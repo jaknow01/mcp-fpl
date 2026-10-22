@@ -1,0 +1,99 @@
+# mcp-fpl on k3s. Create the Secrets first:
+#   kubectl -n mcp create secret generic mcp-fpl-env --from-env-file=.env
+#   kubectl -n mcp create secret generic mcp-fpl-clients --from-file=clients.yaml=config/clients.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-fpl
+  namespace: mcp
+  labels: {app: mcp-fpl}
+spec:
+  replicas: 1                      # rate limits/caches are per process
+  selector:
+    matchLabels: {app: mcp-fpl}
+  template:
+    metadata:
+      labels: {app: mcp-fpl}
+    spec:
+      containers:
+        - name: mcp-fpl
+          image: ghcr.io/jaknow01/mcp-fpl:v0.1.0
+          args: ["serve"]
+          ports: [{containerPort: 8010, name: http}]
+          envFrom: [{secretRef: {name: mcp-fpl-env}}]
+          env: [{name: MCP_CLIENTS_CONFIG, value: /config/clients.yaml}]
+          volumeMounts: [{name: clients, mountPath: /config, readOnly: true}]
+          readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 30}
+          resources:
+            requests: {cpu: 20m, memory: 96Mi}
+            limits: {memory: 384Mi}
+      volumes:
+        - name: clients
+          secret: {secretName: mcp-fpl-clients}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-fpl
+  namespace: mcp
+spec:
+  selector: {app: mcp-fpl}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+# Daily league history snapshot (04:00 Europe/Warsaw) and squad-cache warming (every 3 h).
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: mcp-fpl-collect, namespace: mcp}
+spec:
+  schedule: "0 4 * * *"
+  timeZone: Europe/Warsaw
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: collect
+              image: ghcr.io/jaknow01/mcp-fpl:v0.1.0
+              args: ["collect"]
+              envFrom: [{secretRef: {name: mcp-fpl-env}}]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: mcp-fpl-warm-cache, namespace: mcp}
+spec:
+  schedule: "15 */3 * * *"
+  timeZone: Europe/Warsaw
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: warm-cache
+              image: ghcr.io/jaknow01/mcp-fpl:v0.1.0
+              args: ["warm-cache"]
+              envFrom: [{secretRef: {name: mcp-fpl-env}}]
+---
+# Public entry point: friends' Claude apps reach /mcp/fpl/<key> and /mcp/join.
+# Replace the host; TLS via cert-manager (ClusterIssuer "letsencrypt").
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-fpl
+  namespace: mcp
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  tls: [{hosts: [mcp.example.com], secretName: mcp-fpl-tls}]
+  rules:
+    - host: mcp.example.com
+      http:
+        paths:
+          - {path: /mcp/fpl, pathType: Prefix, backend: {service: {name: mcp-fpl, port: {name: http}}}}
+          - {path: /mcp/join, pathType: Exact, backend: {service: {name: mcp-fpl, port: {name: http}}}}

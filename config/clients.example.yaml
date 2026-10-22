@@ -1,0 +1,9 @@
+# API-key holders for mcp-fpl. Copy to config/clients.yaml (gitignored).
+# Generate an entry:  uv run jarvis-mcp-keys new <client_id> --servers fpl [--trusted]
+clients:
+  jarvis:
+    name: Jarvis
+    key_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    servers: [fpl]
+    trusted: true          # may send X-On-Behalf-Of (the user/household it acts for)
+    rate_limit_per_minute: 300

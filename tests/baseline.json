@@ -1,0 +1,308 @@
+{
+  "agent": "fpl_agent",
+  "tools": [
+    {
+      "name": "get_fpl_fixtures",
+      "description": "get_fpl_fixtures(gameweek: int | None = None) -> dict\n\nDescription:\n    Lists the Premier League fixtures (matches) for a Fantasy Premier League\n    gameweek, with each team's official FDR difficulty rating (1 = easiest,\n    5 = hardest) and kickoff time. Use this to answer \"what are today's / the\n    upcoming matches / this round\" questions.\n\nParameters:\nctx : Context\n    Context in which the tool operates\n\ngameweek: Optional[int] = None\n    The gameweek number to list fixtures for. If omitted, the round currently in\n    play is used: the current gameweek while it is still running (which is the one\n    that contains \"today's\" matches), or the next gameweek once the current one has\n    finished. To pinpoint a specific day, read each fixture's kickoff_time and\n    compare it to today's date from the environment context.\n\nOutput:\n    JSON object with the resolved gameweek and a list of fixtures. Each fixture\n    gives the home/away team names, their difficulty ratings, kickoff time, and —\n    if the match has been played — the final score.",
+      "input_schema": {
+        "properties": {
+          "gameweek": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Gameweek"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_fpl_league_standings",
+      "description": "get_fpl_league_standings(league_id: int | None = None, limit: int = 25) -> dict\n\nDescription:\n    Returns the standings (table) of a Fantasy Premier League classic mini-league:\n    the ranked managers with their team name, total points and last-gameweek\n    points. The owner's own row is flagged. Use this for \"how's my league doing /\n    what's the table in my league\".\n\nParameters:\nctx : Context\n    Context in which the tool operates\n\nleague_id: Optional[int] = None\n    The classic league id to fetch. If omitted, the owner's configured\n    default league is used. Use get_my_fpl_leagues to discover\n    league ids.\n\nlimit: int = 25\n    Maximum number of ranked entries to return (from the top of the table).\n\nOutput:\n    JSON object with the league name and the ranked standings (rank, team name,\n    manager name, total points, last-gameweek points), with the owner's row marked.",
+      "input_schema": {
+        "properties": {
+          "league_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "League Id"
+          },
+          "limit": {
+            "default": 25,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_fpl_live",
+      "description": "get_fpl_live(gameweek: int | None = None, include_my_players: bool = True, entry_id: int | None = None) -> dict\n\nDescription:\n    Real-time state of the gameweek: which Premier League matches are being played\n    right now, what is happening in them (live score, minute, goals, assists, cards)\n    and — for the owner — how each of their FPL players is doing live (minutes,\n    goals, bonus, live points, and whether that player's match is in play). Use this\n    for \"are there matches on now / what's the score / how are my players doing\".\n\n    Each of the owner's players also carries `started` and `playing_status`, which\n    reflect the REAL match — 'playing (started)', 'playing (subbed on)', 'benched\n    (not on)', 'played/did not play' — so you can tell a player who is actually on\n    the pitch from one the owner has in their FPL XI but who is sitting on the real\n    bench. `my_players.starters_not_playing` lists exactly those benched/unused XI\n    players. This becomes known only once lineups are confirmed at kickoff.\n\nParameters:\nctx : Context\n    Context in which the tool operates\n\ngameweek: Optional[int] = None\n    The gameweek to inspect. If omitted, the round currently in play is used\n    (the current gameweek while it is unfinished, else the next one).\n\ninclude_my_players: bool = True\n    When true, also return the owner's squad with live per-player stats. Set false\n    to only get the match scores/events (e.g. when no manager id is configured).\n\nentry_id: Optional[int] = None\n    The FPL manager (\"entry\") id for the squad section. If omitted, the owner's\n    configured default manager id is used.\n\nOutput:\n    JSON object with `any_live` (is any match in play), `live_matches` (in-progress\n    matches with live score, minute and events), `finished_matches` (final scores\n    for matches already played this gameweek) and, when requested, `my_players`\n    (each squad player's live stats, match status and provisional points).",
+      "input_schema": {
+        "properties": {
+          "gameweek": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Gameweek"
+          },
+          "include_my_players": {
+            "default": true,
+            "title": "Include My Players",
+            "type": "boolean"
+          },
+          "entry_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Entry Id"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_fpl_player",
+      "description": "get_fpl_player(name: str, upcoming_fixtures: int = 5) -> dict\n\nDescription:\n    Looks up a single Premier League player by name and returns their FPL profile:\n    current price, position, team, total points, form, ownership (% selected),\n    availability status, and the next few fixtures with their FDR difficulty. Use\n    this for questions about ANY player (not just the owner's squad), e.g. \"how much\n    does Haaland cost now?\", \"what's Saka's form?\", \"who does Palmer play next and\n    how hard are the fixtures?\".\n\nParameters:\nctx : Context\n    Context in which the tool operates\n\nname: str\n    Free-text player name to resolve (e.g. 'Haaland', 'Bruno Fernandes', 'Saka').\n    Matching is by web name first (an exact web-name match wins); otherwise all\n    substring matches across first/second/web name are returned for disambiguation.\n\nupcoming_fixtures: int = 5\n    How many of the player's next fixtures to include (each with opponent,\n    home/away, FDR difficulty 1-5 and kickoff time). Set to 0 to skip fixtures.\n\nOutput:\n    JSON object. On a single match: the player's profile plus `upcoming_fixtures`\n    and `chance_of_playing_this_round`/`chance_of_playing_next_round`. When the name\n    is ambiguous, returns `ambiguous: true` with a compact list of candidates (name,\n    team, position, price) so the caller can pick one. Note: `status`/`chance_of_playing`\n    report AVAILABILITY (injury/suspension), NOT a confirmed pre-match starting lineup —\n    the FPL API does not publish announced XIs.",
+      "input_schema": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "upcoming_fixtures": {
+            "default": 5,
+            "title": "Upcoming Fixtures",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_league_history",
+      "description": "get_league_history(view: Literal['standings', 'squads'] = 'standings', days: int = 30, manager: str | None = None, league_id: int | None = None) -> dict\n\nDescription:\n    Returns the mini-league's HISTORY OVER TIME from Jarvis's own database (a daily\n    snapshot is recorded at 04:00 for every manager: their rank, points, and full squad).\n    Use this for change-over-time questions the live standings tool cannot answer:\n    \"kto najbardziej awansował w tabeli\", \"jak zmieniły się moje punkty w miesiąc\",\n    \"kogo miał w składzie X dwa tygodnie temu\", \"kto wpadł/wypadł ze składu\".\n    For the CURRENT table use get_fpl_league_standings; for CURRENT ownership use\n    get_league_ownership / who_owns_player_in_league.\n\nParameters:\nctx : Context\n    Context in which the tool operates.\n\nview: \"standings\" | \"squads\" = \"standings\"\n    - \"standings\": rank + points movement. Without `manager`: every manager's rank and\n      total at the start vs end of the window, with deltas (who climbed/fell, who gained\n      most points). With `manager`: that manager's full daily series (rank, total, GW pts).\n    - \"squads\": which footballers managers had, grouped by gameweek. With `manager`: that\n      manager's squad per gameweek in the window. Without `manager`: the most recent\n      snapshot's squads for all managers.\n\ndays: int = 30\n    How far back to look, in calendar days. Defaults to 30.\n\nmanager: Optional[str] = None\n    Free-text filter on a manager's name or team name (e.g. 'Kuba', 'Wombat FC'). Omit\n    for the whole league.\n\nleague_id: Optional[int] = None\n    The classic league id. If omitted, the owner's configured default league is used.\n\nOutput:\n    JSON with the resolved league/window and the requested view; or a message when no\n    history has been recorded yet (the collector needs a configured database and at least\n    one daily run, or a backfill).",
+      "input_schema": {
+        "properties": {
+          "view": {
+            "default": "standings",
+            "enum": [
+              "standings",
+              "squads"
+            ],
+            "title": "View",
+            "type": "string"
+          },
+          "days": {
+            "default": 30,
+            "title": "Days",
+            "type": "integer"
+          },
+          "manager": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Manager"
+          },
+          "league_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "League Id"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_league_ownership",
+      "description": "get_league_ownership(league_id: int | None = None, gameweek: int | None = None, top_n: int = 20, max_managers: int = 50) -> dict\n\nDescription:\n    Aggregates squad ownership across a Fantasy Premier League mini-league: which\n    players are the most-owned within the league (effective in-league ownership) and\n    how often each is captained. Use it for \"what's popular in my league / most\n    picked players / template\" questions. To check one specific player instead, use\n    who_owns_player_in_league.\n\nParameters:\nctx : Context\n    Context in which the tool operates\n\nleague_id: Optional[int] = None\n    The classic league to scan. If omitted, the owner's configured\n    default league is used.\n\ngameweek: Optional[int] = None\n    The gameweek whose squads to aggregate. If omitted, the current gameweek is used.\n\ntop_n: int = 20\n    How many of the most-owned players to return.\n\nmax_managers: int = 50\n    Safety cap on how many managers (from the top of the table by rank) to scan.\n\nOutput:\n    JSON object with the league, how many managers were scanned and the most-owned\n    players (name, team, position, how many managers own them, in-league ownership %\n    and how many captained them).",
+      "input_schema": {
+        "properties": {
+          "league_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "League Id"
+          },
+          "gameweek": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Gameweek"
+          },
+          "top_n": {
+            "default": 20,
+            "title": "Top N",
+            "type": "integer"
+          },
+          "max_managers": {
+            "default": 50,
+            "title": "Max Managers",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_my_fpl_leagues",
+      "description": "get_my_fpl_leagues(entry_id: int | None = None) -> dict\n\nDescription:\n    Lists the classic (points-based) mini-leagues the owner's Fantasy Premier League\n    manager is a member of, with the manager's current rank in each. Use this to\n    discover league ids (e.g. to then fetch a specific league's standings) or to\n    answer \"which leagues am I in / what's my rank\".\n\nParameters:\nctx : Context\n    Context in which the tool operates\n\nentry_id: Optional[int] = None\n    The FPL manager (\"entry\") id. If omitted, the owner's configured\n    default manager id is used.\n\nOutput:\n    JSON object with the manager's name and a list of their classic leagues\n    (league id, name, and the manager's rank in it).",
+      "input_schema": {
+        "properties": {
+          "entry_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Entry Id"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_my_fpl_squad",
+      "description": "get_my_fpl_squad(gameweek: int | None = None, entry_id: int | None = None) -> dict\n\nDescription:\n    Returns the owner's Fantasy Premier League squad (the 15 players picked) for a\n    gameweek, with each player resolved to name/team/position, the captain and\n    vice-captain marked, and the starting XI vs. bench split. Also reports that\n    gameweek's points, squad value and money in the bank.\n\nParameters:\nctx : Context\n    Context in which the tool operates\n\ngameweek: Optional[int] = None\n    The gameweek to fetch the squad for. If omitted, the current gameweek is used.\n    Note: a squad only becomes public after that gameweek's deadline has passed.\n\nentry_id: Optional[int] = None\n    The FPL manager (\"entry\") id to look up. If omitted, the owner's\n    configured default manager id is used.\n\nOutput:\n    JSON object with the resolved gameweek, a per-gameweek summary (points, bank,\n    squad value) and the list of picked players (starting XI first, then bench),\n    each flagged with captaincy and whether they are on the bench.",
+      "input_schema": {
+        "properties": {
+          "gameweek": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Gameweek"
+          },
+          "entry_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Entry Id"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_pl_teams",
+      "description": "get_pl_teams() -> dict\n\nDescription:\n    Lists all Premier League teams in the current Fantasy Premier League season,\n    with their short codes and FPL strength ratings (overall/attack/defence,\n    split home/away, on a 1-5 scale). Use this for questions about the teams\n    themselves (who is in the league, relative strength).\n\nParameters:\nctx : Context\n    Context in which the tool operates\n\nOutput:\n    JSON object with a list of teams (name, short_name, and strength ratings).",
+      "input_schema": {
+        "properties": {},
+        "type": "object"
+      }
+    },
+    {
+      "name": "who_owns_player_in_league",
+      "description": "who_owns_player_in_league(player: str, league_id: int | None = None, gameweek: int | None = None, max_managers: int = 50) -> dict\n\nDescription:\n    Finds which managers in a Fantasy Premier League mini-league own a given player,\n    and how many. Answers questions like \"does anyone else in my league have Dalot\"\n    or \"how many people have Haaland\". It scans each manager's squad for the\n    gameweek, so it also knows who has captained the player or has him on their bench.\n\nParameters:\nctx : Context\n    Context in which the tool operates\n\nplayer: str\n    The player's name (e.g. 'Haaland', 'Dalot', 'Bruno Fernandes'). Resolved against\n    the FPL player list; if the name is ambiguous the tool returns the candidates so\n    you can ask the user which one they meant.\n\nleague_id: Optional[int] = None\n    The classic league to scan. If omitted, the owner's configured\n    default league is used. Use get_my_fpl_leagues to discover league ids.\n\ngameweek: Optional[int] = None\n    The gameweek whose squads to check. If omitted, the current gameweek is used.\n\nmax_managers: int = 50\n    Safety cap on how many managers (from the top of the table by rank) to scan.\n\nOutput:\n    JSON object with the resolved player, the league, how many of the scanned\n    managers own the player (with in-league ownership %) and the list of owners\n    (manager, team name, rank, whether captained or benched by them).",
+      "input_schema": {
+        "properties": {
+          "player": {
+            "title": "Player",
+            "type": "string"
+          },
+          "league_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "League Id"
+          },
+          "gameweek": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Gameweek"
+          },
+          "max_managers": {
+            "default": 50,
+            "title": "Max Managers",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "player"
+        ],
+        "type": "object"
+      }
+    }
+  ]
+}
