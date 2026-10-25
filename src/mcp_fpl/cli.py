@@ -1,10 +1,10 @@
 """`mcp-fpl` command line.
 
-    mcp-fpl serve                       run the MCP server + /mcp/join (default)
+    mcp-fpl serve                       run the MCP server + /join (default)
     mcp-fpl collect [--league ID ...]   today's league history snapshot (CronJob 04:00)
     mcp-fpl warm-cache [--league ID]    refresh the current gameweek's squad scans (every 3 h)
     mcp-fpl backfill [--league ID] [--from-gw N]   rebuild history from the FPL API
-    mcp-fpl keys list | keys revoke ENTRY_ID       self-service keys from /mcp/join
+    mcp-fpl keys list | keys revoke ENTRY_ID       self-service keys from /join
 """
 
 import argparse

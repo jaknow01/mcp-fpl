@@ -1,4 +1,4 @@
-"""Self-service key page: ``GET/POST /mcp/join`` (see docs/MCP.md).
+"""Self-service key page: ``GET/POST /join`` (alias ``/mcp/join``) (see docs/MCP.md).
 
 A manager of one of the configured FPL leagues types their entry id, team name or own name,
 and gets an API key for this server — already linked to their entry and league, with a
@@ -194,7 +194,7 @@ def _form(prefill: str = "", note: str = "") -> str:
         "i własność zawodników w naszej lidze) do swojego Claude — w aplikacji na telefonie, "
         "na komputerze albo w Claude Code.</p>"
         f"{note}"
-        "<form method='post' action='/mcp/join'>"
+        "<form method='post' action=''>"
         "<label for='team'><b>Twoja drużyna</b></label>"
         f"<input id='team' name='team' type='text' value='{_e(prefill)}' autocomplete='off' required "
         "placeholder='ID drużyny, nazwa drużyny albo imię i nazwisko'>"
@@ -213,7 +213,7 @@ _MAX_CHOICES = 12
 
 def _choices(members: list[dict]) -> str:
     buttons = "".join(
-        "<form class='choice' method='post' action='/mcp/join'>"
+        "<form class='choice' method='post' action=''>"
         f"<input type='hidden' name='team' value='{m['entry']}'>"
         f"<button class='secondary' type='submit'>{_member_label(m)}</button></form>"
         for m in members[:_MAX_CHOICES]
@@ -221,7 +221,7 @@ def _choices(members: list[dict]) -> str:
     more = ""
     if len(members) > _MAX_CHOICES:
         more = (f"<p class='muted'>…i {len(members) - _MAX_CHOICES} więcej. Wpisz dokładniejszą "
-                "nazwę albo ID drużyny.</p><form method='get' action='/mcp/join'>"
+                "nazwę albo ID drużyny.</p><form method='get' action=''>"
                 "<button class='secondary' type='submit'>Szukaj ponownie</button></form>")
     return f"<div class='card'><h2>Którą drużynę masz na myśli?</h2>{buttons}{more}</div>"
 
@@ -232,18 +232,18 @@ def _confirm_replace(m: dict) -> str:
         f"<h2 class='warn'>Ta drużyna ma już klucz</h2><p>{_member_label(m)}</p>"
         "<p>Nowy klucz <b>unieważni poprzedni</b> — wszystkie podłączenia na starym kluczu "
         "przestaną działać. Rób to, jeśli zgubiłeś klucz albo chcesz go zmienić.</p>"
-        "<form method='post' action='/mcp/join'>"
+        "<form method='post' action=''>"
         f"<input type='hidden' name='team' value='{m['entry']}'>"
         "<input type='hidden' name='replace' value='1'>"
         "<button type='submit'>Tak, wygeneruj nowy klucz</button></form>"
-        "<form method='get' action='/mcp/join'><button class='secondary' type='submit'>Anuluj</button></form>"
+        "<form method='get' action=''><button class='secondary' type='submit'>Anuluj</button></form>"
         "</div>"
     )
 
 
 def _issued(m: dict, key: str, base: str) -> str:
-    connector = f"{base}/mcp/fpl/{key}"
-    cli = f'claude mcp add --transport http jarvis-fpl {base}/mcp/fpl --header "Authorization: Bearer {key}"'
+    connector = f"{base}/mcp/{key}"
+    cli = f'claude mcp add --transport http fpl {base}/mcp --header "Authorization: Bearer {key}"'
 
     def copy_box(ident: str, value: str) -> str:
         return (f"<span class='box' id='{ident}'>{_e(value)}</span>"
@@ -363,4 +363,6 @@ class JoinService:
 
 def build_join_routes(registry: ClientRegistry, store: Any, **kwargs) -> list[Route]:
     service = JoinService(registry, store, **kwargs)
-    return [Route("/mcp/join", service.endpoint, methods=["GET", "POST"])]
+    # /join on the server's own subdomain; /mcp/join kept for older links.
+    return [Route("/join", service.endpoint, methods=["GET", "POST"]),
+            Route("/mcp/join", service.endpoint, methods=["GET", "POST"])]

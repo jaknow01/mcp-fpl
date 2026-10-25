@@ -26,6 +26,6 @@ def env_int(name: str, default: int, minimum: Optional[int] = None) -> int:
 
 def league_ids() -> list[int]:
     """``FPL_LEAGUES``: the classic leagues this server collects history for, keeps warm,
-    and whose managers may get a key on /mcp/join."""
+    and whose managers may get a key on /join."""
     raw = env_str("FPL_LEAGUES") or ""
     return [int(x) for x in raw.replace(" ", "").split(",") if x.isdigit()]

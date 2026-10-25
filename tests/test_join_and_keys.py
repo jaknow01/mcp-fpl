@@ -89,7 +89,8 @@ def test_join_flow_issue_confirm_replace(env):
     async def flow():
         async with serving(app):
             async with http_client(app) as h:
-                seen["form"] = await h.get("/mcp/join")
+                seen["form"] = await h.get("/join")
+                seen["old_path"] = await h.get("/mcp/join")
                 seen["missing"] = await h.post("/mcp/join", data={"team": "Nobody United"})
                 seen["ambiguous"] = await h.post("/mcp/join", data={"team": "nowak"})
                 seen["issued"] = await h.post("/mcp/join", data={"team": "Marek Kowalski"})
@@ -109,10 +110,11 @@ def test_join_flow_issue_confirm_replace(env):
 
     key1, key2 = asyncio.run(flow())
     assert seen["form"].status_code == 200 and "<form" in seen["form"].text
+    assert seen["old_path"].status_code == 200 and "action=''" in seen["form"].text
     assert seen["missing"].status_code == 404 and _key_in(seen["missing"].text) is None
     assert "Którą drużynę" in seen["ambiguous"].text and _key_in(seen["ambiguous"].text) is None
     assert seen["issued"].headers["cache-control"] == "no-store"
-    assert f"https://jarvis.example/mcp/fpl/{key1}" in seen["issued"].text
+    assert f"https://jarvis.example/mcp/{key1}" in seen["issued"].text
     who1 = text_of(seen["who1"]).replace(" ", "")
     assert '"client":"fpl-102"' in who1 and '"default_entry_id":102' in who1
     assert "ma już klucz" in seen["again"].text and _key_in(seen["again"].text) is None

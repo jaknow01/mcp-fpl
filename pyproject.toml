@@ -1,13 +1,13 @@
 [project]
 name = "mcp-fpl"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fantasy Premier League tools (fixtures, live, squads, mini-leagues, history) and a self-service key page, as an MCP server."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 authors = [{ name = "Kuba" }]
 dependencies = [
-    "jarvis-mcp-kit @ git+https://github.com/jaknow01/jarvis-mcp-kit.git@v0.1.0",
+    "jarvis-mcp-kit @ git+https://github.com/jaknow01/jarvis-mcp-kit.git@v0.3.0",
     "requests>=2.31",
     "python-multipart>=0.0.9",
     "psycopg[binary]>=3.2,<4",

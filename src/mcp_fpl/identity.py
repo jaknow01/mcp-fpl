@@ -2,7 +2,7 @@
 
 1. an explicit ``entry_id`` / ``league_id`` argument on the tool call;
 2. the defaults linked to the caller's API key (``fpl: {entry_id, league_id}`` in the
-   clients file, or the entry/league a /mcp/join key was issued for).
+   clients file, or the entry/league a /join key was issued for).
 
 There is no server-wide fallback: a caller without linked defaults gets an error asking
 for the id, never another manager's team.
@@ -32,7 +32,7 @@ def resolve_league_id(override: Optional[int]) -> Optional[int]:
 def missing_entry_tip() -> str:
     return ("No default FPL manager id is linked to this caller. Pass entry_id explicitly "
             "(the number in the FPL site URL: fantasy.premierleague.com/entry/<id>/...), "
-            "or get a personal key on the server's /mcp/join page.")
+            "or get a personal key on the server's /join page.")
 
 
 def missing_league_tip() -> str:
