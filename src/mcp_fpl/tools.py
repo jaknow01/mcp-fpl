@@ -400,7 +400,7 @@ async def get_league_history(view: Literal["standings", "squads"] = "standings",
                              league_id: Optional[int] = None) -> dict:
     """
     Description:
-        Returns the mini-league's HISTORY OVER TIME from Jarvis's own database (a daily
+        Returns the mini-league's HISTORY OVER TIME from this server's own database (a daily
         snapshot is recorded at 04:00 for every manager: their rank, points, and full squad).
         Use this for change-over-time questions the live standings tool cannot answer:
         "kto najbardziej awansował w tabeli", "jak zmieniły się moje punkty w miesiąc",

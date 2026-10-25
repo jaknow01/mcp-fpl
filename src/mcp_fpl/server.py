@@ -41,5 +41,5 @@ def _issued_clients():
     return issued_clients()
 
 
-server = ToolServer("fpl", title="Jarvis FPL", instructions=INSTRUCTIONS,
+server = ToolServer("fpl", title="FPL", instructions=INSTRUCTIONS,
                     registry=ClientRegistry(issued=_issued_clients), describe_client=_describe)

@@ -180,8 +180,8 @@ def _page(body: str, status: int = 200) -> HTMLResponse:
         "<!doctype html><html lang='pl'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<meta name='robots' content='noindex'>"
-        f"<title>Jarvis FPL – klucz</title><style>{_CSS}</style></head>"
-        f"<body><main><h1>⚽ Jarvis FPL dla Claude</h1>{body}</main>"
+        f"<title>FPL – klucz</title><style>{_CSS}</style></head>"
+        f"<body><main><h1>⚽ FPL dla Claude</h1>{body}</main>"
         f"<script>{_COPY_JS}</script></body></html>"
     )
     return HTMLResponse(doc, status_code=status, headers=_HEADERS)
@@ -258,7 +258,7 @@ def _issued(m: dict, key: str, base: str) -> str:
         "<div class='card'><h2>📱 Aplikacja Claude (telefon / komputer)</h2><ol>"
         "<li>Na <b>claude.ai</b> albo w aplikacji desktop otwórz <b>Ustawienia → Connectors</b> "
         "→ <b>Add custom connector</b>.</li>"
-        "<li>Nazwa: <code>Jarvis FPL</code>, URL — wklej ten adres (zawiera Twój klucz):</li></ol>"
+        "<li>Nazwa: <code>FPL</code>, URL — wklej ten adres (zawiera Twój klucz):</li></ol>"
         f"{copy_box('u', connector)}"
         "<p class='muted'>Po dodaniu connector działa też w aplikacji mobilnej. "
         "Na telefonie może być potrzebne włączenie go w danej rozmowie.</p></div>"
