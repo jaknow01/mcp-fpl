@@ -1,4 +1,6 @@
 name: ci
+# Tests on every push/PR. A tag v* also builds the image into GHCR and bumps its tag in the
+# private GitOps repo (jaknow01/homelab-gitops), which Argo CD syncs to the cluster.
 on:
   push:
     branches: [main]
@@ -7,6 +9,9 @@ on:
 permissions:
   contents: read
   packages: write
+env:
+  IMAGE: ghcr.io/jaknow01/mcp-fpl
+  GITOPS_DIR: mcp/fpl
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -15,6 +20,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --python 3.12
       - run: uv run pytest -q
+
   image:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: test
@@ -33,5 +39,42 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/jaknow01/mcp-fpl:${{ github.ref_name }}
-            ghcr.io/jaknow01/mcp-fpl:latest
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:latest
+
+  deploy:
+    # Needs repo secret GITOPS_TOKEN: a fine-grained PAT with Contents read/write on
+    # jaknow01/homelab-gitops. Without it the step is skipped (image is still published).
+    needs: image
+    runs-on: ubuntu-latest
+    env:
+      GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+    steps:
+      - name: Check token
+        id: token
+        run: |
+          if [ -z "$GITOPS_TOKEN" ]; then
+            echo "::warning::GITOPS_TOKEN not set — bump ${{ env.GITOPS_DIR }} to ${{ github.ref_name }} by hand"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.token.outputs.ok == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: jaknow01/homelab-gitops
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+      - name: Bump image tag
+        if: steps.token.outputs.ok == 'true'
+        working-directory: gitops
+        run: |
+          TAG="${{ github.ref_name }}"
+          yq -i "(.images[] | select(.name == \"$IMAGE\")).newTag = \"$TAG\"" "$GITOPS_DIR/kustomization.yaml"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$GITOPS_DIR/kustomization.yaml"
+          git diff --cached --quiet && { echo "already at $TAG"; exit 0; }
+          git commit -m "deploy(${{ github.event.repository.name }}): $TAG"
+          for i in 1 2 3 4 5; do git pull --rebase -q && git push -q && exit 0; sleep $((i * 3)); done
+          exit 1
