@@ -115,6 +115,11 @@ def test_join_flow_issue_confirm_replace(env):
     assert "Którą drużynę" in seen["ambiguous"].text and _key_in(seen["ambiguous"].text) is None
     assert seen["issued"].headers["cache-control"] == "no-store"
     assert f"https://jarvis.example/mcp/{key1}" in seen["issued"].text
+    assert "Claude" not in seen["form"].text and "agenta" in seen["form"].text
+    tabs = re.findall(r"data-tab='p-(\w+)'[^>]*aria-selected='(\w+)'", seen["issued"].text)
+    assert [t for t, _ in tabs] == ["claude", "chatgpt", "openai", "cursor", "vscode", "gemini", "local", "other"]
+    assert [t for t, sel in tabs if sel == "true"] == ["claude"]
+    assert f"Bearer {key1}" in seen["issued"].text
     who1 = text_of(seen["who1"]).replace(" ", "")
     assert '"client":"fpl-102"' in who1 and '"default_entry_id":102' in who1
     assert "ma już klucz" in seen["again"].text and _key_in(seen["again"].text) is None

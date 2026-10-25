@@ -1,8 +1,9 @@
 """Self-service key page: ``GET/POST /join`` (alias ``/mcp/join``) (see docs/MCP.md).
 
 A manager of one of the configured FPL leagues types their entry id, team name or own name,
-and gets an API key for this server — already linked to their entry and league, with a
-ready-to-paste connector URL and Claude Code command.
+and gets an API key for this server — already linked to their entry and league, with
+ready-to-paste setup for several MCP clients (Claude, ChatGPT, OpenAI API, Cursor, VS Code,
+Gemini CLI, self-hosted assistants, anything else that speaks MCP over HTTP), shown as tabs with Claude first.
 
 There is deliberately NO proof of ownership: league tables are public, so this is a
 convenience gate ("only people from my league"), not authentication. What keeps it sane:
@@ -18,6 +19,7 @@ Leagues: ``FPL_LEAGUES`` (comma list). Switch:
 
 import asyncio
 import html
+import json
 import logging
 import os
 import time
@@ -156,9 +158,24 @@ code,.box{font-family:ui-monospace,Menlo,monospace;font-size:13px;word-break:bre
 .box{display:block;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;margin:6px 0}
 .ok{color:var(--ok)}.warn{color:var(--warn)}ol{padding-left:20px}
 .choice button{width:100%;text-align:left;margin-top:8px}
+pre.box{white-space:pre-wrap;word-break:normal;overflow-wrap:anywhere;margin:6px 0}
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 12px}
+.tabs button{margin:0;padding:8px 12px;font-size:14px;background:transparent;color:var(--fg);border:1px solid var(--border)}
+.tabs button[aria-selected=true]{background:var(--accent);color:#fff;border-color:var(--accent)}
+.panel h3{font-size:15px;margin:16px 0 4px}.panel h3:first-child{margin-top:0}
 """
 
 _COPY_JS = """
+const tabs = document.querySelectorAll('[role=tab]');
+function show(id) {
+  for (const t of tabs) {
+    const on = t.dataset.tab === id;
+    t.setAttribute('aria-selected', on);
+    document.getElementById(t.dataset.tab).hidden = !on;
+  }
+}
+for (const t of tabs) t.addEventListener('click', () => show(t.dataset.tab));
+if (tabs.length) show(tabs[0].dataset.tab);
 for (const b of document.querySelectorAll('[data-copy]')) b.addEventListener('click', async () => {
   const t = document.getElementById(b.dataset.copy).textContent;
   try { await navigator.clipboard.writeText(t); b.textContent = 'Skopiowano ✓'; } catch (e) { b.textContent = 'Zaznacz i skopiuj ręcznie'; }
@@ -181,7 +198,7 @@ def _page(body: str, status: int = 200) -> HTMLResponse:
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<meta name='robots' content='noindex'>"
         f"<title>FPL – klucz</title><style>{_CSS}</style></head>"
-        f"<body><main><h1>⚽ FPL dla Claude</h1>{body}</main>"
+        f"<body><main><h1>⚽ FPL dla Twojego agenta AI</h1>{body}</main>"
         f"<script>{_COPY_JS}</script></body></html>"
     )
     return HTMLResponse(doc, status_code=status, headers=_HEADERS)
@@ -191,8 +208,8 @@ def _form(prefill: str = "", note: str = "") -> str:
     return (
         "<div class='card'>"
         "<p>Podłącz narzędzia FPL (terminarz z FDR, Twoja drużyna, wyniki na żywo, tabela "
-        "i własność zawodników w naszej lidze) do swojego Claude — w aplikacji na telefonie, "
-        "na komputerze albo w Claude Code.</p>"
+        "i własność zawodników w naszej lidze) do swojego agenta AI — działa z każdym agentem, "
+        "który obsługuje MCP (Model Context Protocol), w przeglądarce, na telefonie albo w edytorze.</p>"
         f"{note}"
         "<form method='post' action=''>"
         "<label for='team'><b>Twoja drużyna</b></label>"
@@ -241,29 +258,132 @@ def _confirm_replace(m: dict) -> str:
     )
 
 
-def _issued(m: dict, key: str, base: str) -> str:
-    connector = f"{base}/mcp/{key}"
-    cli = f'claude mcp add --transport http fpl {base}/mcp --header "Authorization: Bearer {key}"'
+class _Boxes:
+    """Copyable code boxes with unique ids on one page."""
 
-    def copy_box(ident: str, value: str) -> str:
-        return (f"<span class='box' id='{ident}'>{_e(value)}</span>"
+    def __init__(self):
+        self.n = 0
+
+    def __call__(self, value: str) -> str:
+        self.n += 1
+        ident = f"b{self.n}"
+        return (f"<pre class='box' id='{ident}'>{_e(value)}</pre>"
                 f"<button class='secondary' type='button' data-copy='{ident}'>Kopiuj</button>")
 
+
+def _json(obj: dict) -> str:
+    return json.dumps(obj, indent=2, ensure_ascii=False)
+
+
+def _python_snippet(endpoint: str, key: str) -> str:
+    return (
+        "import asyncio\n"
+        "from mcp import ClientSession\n"
+        "from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client\n\n"
+        f'URL = "{endpoint}"\n'
+        f'HEADERS = {{"Authorization": "Bearer {key}"}}\n\n'
+        "async def main():\n"
+        "    async with create_mcp_http_client(headers=HEADERS) as http, \\\n"
+        "            streamable_http_client(URL, http_client=http) as (read, write):\n"
+        "        async with ClientSession(read, write) as session:\n"
+        "            await session.initialize()\n"
+        "            tools = await session.list_tools()\n"
+        "            print([t.name for t in tools.tools])\n"
+        '            result = await session.call_tool("whoami", {})\n'
+        "            print(result.content)\n\n"
+        "asyncio.run(main())"
+    )
+
+
+def _provider_tabs(key: str, base: str, box: _Boxes) -> str:
+    endpoint = f"{base}/mcp"
+    url_with_key = f"{base}/mcp/{key}"
+    bearer = {"Authorization": f"Bearer {key}"}
+    cli = f'claude mcp add --transport http fpl {endpoint} --header "Authorization: Bearer {key}"'
+    openai_tool = {"type": "mcp", "server_label": "fpl", "server_url": endpoint,
+                   "headers": bearer, "require_approval": "never"}
+    cursor = {"mcpServers": {"fpl": {"url": endpoint, "headers": bearer}}}
+    vscode = {"servers": {"fpl": {"type": "http", "url": endpoint, "headers": bearer}}}
+    gemini = {"mcpServers": {"fpl": {"httpUrl": endpoint, "headers": bearer}}}
+
+    panels = [
+        ("claude", "Claude",
+         "<h3>Aplikacja Claude (www, komputer, telefon)</h3><ol>"
+         "<li>Na <b>claude.ai</b> albo w aplikacji desktop otwórz <b>Ustawienia → Connectors</b> "
+         "→ <b>Add custom connector</b>.</li>"
+         "<li>Nazwa: <code>FPL</code>, URL — wklej ten adres (zawiera Twój klucz):</li></ol>"
+         f"{box(url_with_key)}"
+         "<p class='muted'>Po dodaniu connector działa też w aplikacji mobilnej. "
+         "Na telefonie może być potrzebne włączenie go w danej rozmowie.</p>"
+         f"<h3>Claude Code</h3>{box(cli)}"),
+        ("chatgpt", "ChatGPT",
+         "<ol><li>W <b>Ustawieniach → Apps &amp; Connectors → Advanced settings</b> włącz "
+         "<b>Developer mode</b>.</li>"
+         "<li>Wróć do <b>Apps &amp; Connectors</b> i wybierz <b>Create</b> (dodaj własny connector).</li>"
+         "<li>Nazwa: <code>FPL</code>, MCP Server URL — wklej ten adres:</li></ol>"
+         f"{box(url_with_key)}"
+         "<ol start='4'><li>Authentication: <b>No authentication</b> — klucz jest już w adresie.</li>"
+         "<li>W nowej rozmowie włącz connector FPL w menu narzędzi (+).</li></ol>"
+         "<p class='muted'>Developer mode jest dostępny w płatnych planach ChatGPT. "
+         "Nazwy menu mogą się nieco różnić między wersjami.</p>"),
+        ("openai", "OpenAI API",
+         "<p>W <b>Responses API</b> dodaj do <code>tools</code> takie narzędzie:</p>"
+         f"{box(_json(openai_tool))}"
+         "<p class='muted'>Działa tak samo w Agents SDK (<code>HostedMCPTool</code>) "
+         "z tymi samymi polami.</p>"),
+        ("cursor", "Cursor",
+         "<p>Dodaj do <code>~/.cursor/mcp.json</code> (albo <code>.cursor/mcp.json</code> w projekcie):</p>"
+         f"{box(_json(cursor))}"),
+        ("vscode", "VS Code",
+         "<p>GitHub Copilot w trybie Agent: dodaj do <code>.vscode/mcp.json</code> "
+         "(albo przez <b>MCP: Add Server…</b> w palecie poleceń):</p>"
+         f"{box(_json(vscode))}"),
+        ("gemini", "Gemini CLI",
+         "<p>Dodaj do <code>~/.gemini/settings.json</code>:</p>"
+         f"{box(_json(gemini))}"),
+        ("local", "Lokalnie",
+         "<p>Asystent uruchomiony u siebie (np. z modelem z Ollamy albo LM Studio) łączy się z tym "
+         "serwerem przez internet — model może działać lokalnie, narzędzia FPL są tutaj.</p>"
+         "<h3>LM Studio</h3>"
+         "<p>Zakładka <b>Program → Install → Edit mcp.json</b>, dodaj:</p>"
+         f"{box(_json(cursor))}"
+         "<h3>Open WebUI</h3><ol>"
+         "<li><b>Admin Settings → External Tools → +</b>, typ <b>MCP (Streamable HTTP)</b>.</li>"
+         "<li>URL:</li></ol>"
+         f"{box(endpoint)}"
+         "<ol start='3'><li>Auth: <b>Bearer</b>, klucz:</li></ol>"
+         f"{box(key)}"
+         "<h3>Własny kod (Python, oficjalne SDK <code>mcp</code> 2.x)</h3>"
+         f"{box(_python_snippet(endpoint, key))}"
+         "<p class='muted'>Ollama sama nie obsługuje MCP — użyj jej przez klienta, który to robi "
+         "(LM Studio, Open WebUI, własny kod).</p>"),
+        ("other", "Inny agent",
+         "<p>Każdy klient MCP, który obsługuje transport <b>Streamable HTTP</b>:</p>"
+         f"<h3>Adres</h3>{box(endpoint)}"
+         f"<h3>Nagłówek</h3>{box(f'Authorization: Bearer {key}')}"
+         "<p class='muted'>Zamiast nagłówka można użyć <code>X-API-Key</code>. Jeśli klient nie "
+         "pozwala ustawić nagłówków, użyj adresu z kluczem w środku (wtedy bez uwierzytelniania):</p>"
+         f"{box(url_with_key)}"),
+    ]
+    buttons = "".join(
+        f"<button role='tab' type='button' data-tab='p-{pid}' aria-controls='p-{pid}' "
+        f"aria-selected='{'true' if i == 0 else 'false'}'>{_e(label)}</button>"
+        for i, (pid, label, _) in enumerate(panels))
+    bodies = "".join(f"<div class='panel' role='tabpanel' id='p-{pid}'>{body}</div>"
+                     for pid, _, body in panels)
+    return (f"<div class='card'><h2>Podłącz do swojego agenta</h2>"
+            f"<div class='tabs' role='tablist'>{buttons}</div>{bodies}</div>")
+
+
+def _issued(m: dict, key: str, base: str) -> str:
+    box = _Boxes()
     return (
         "<div class='card'>"
         f"<h2 class='ok'>Gotowe ✓</h2><p>{_member_label(m)} · liga {_e(m['league'])}</p>"
         "<p class='warn'><b>Zapisz to teraz — klucz pokazujemy tylko raz.</b> "
         "Traktuj go jak hasło i nie wklejaj nigdzie publicznie.</p>"
-        f"<p><b>Twój klucz</b></p>{copy_box('k', key)}</div>"
-        "<div class='card'><h2>📱 Aplikacja Claude (telefon / komputer)</h2><ol>"
-        "<li>Na <b>claude.ai</b> albo w aplikacji desktop otwórz <b>Ustawienia → Connectors</b> "
-        "→ <b>Add custom connector</b>.</li>"
-        "<li>Nazwa: <code>FPL</code>, URL — wklej ten adres (zawiera Twój klucz):</li></ol>"
-        f"{copy_box('u', connector)}"
-        "<p class='muted'>Po dodaniu connector działa też w aplikacji mobilnej. "
-        "Na telefonie może być potrzebne włączenie go w danej rozmowie.</p></div>"
-        "<div class='card'><h2>💻 Claude Code</h2>"
-        f"{copy_box('c', cli)}</div>"
+        f"<p><b>Twój klucz</b></p>{box(key)}</div>"
+        f"{_provider_tabs(key, base, box)}"
         "<div class='card'><h2>Spróbuj</h2>"
         "<p>„Jak poszło mojej drużynie w tej kolejce?”, „Kto w naszej lidze ma Haalanda?”, "
         "„Jaki terminarz ma Arsenal na 5 kolejek?”</p>"
