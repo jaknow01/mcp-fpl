@@ -120,6 +120,7 @@ def test_join_flow_issue_confirm_replace(env):
     assert [t for t, _ in tabs] == ["claude", "chatgpt", "openai", "cursor", "vscode", "gemini", "local", "other"]
     assert [t for t, sel in tabs if sel == "true"] == ["claude"]
     assert f"Bearer {key1}" in seen["issued"].text
+    assert "No sign-in" in seen["issued"].text
     who1 = text_of(seen["who1"]).replace(" ", "")
     assert '"client":"fpl-102"' in who1 and '"default_entry_id":102' in who1
     assert "ma już klucz" in seen["again"].text and _key_in(seen["again"].text) is None

@@ -313,6 +313,9 @@ def _provider_tabs(key: str, base: str, box: _Boxes) -> str:
          "→ <b>Add custom connector</b>.</li>"
          "<li>Nazwa: <code>FPL</code>, URL — wklej ten adres (zawiera Twój klucz):</li></ol>"
          f"{box(url_with_key)}"
+         "<ol start='3'><li>Authentication: wybierz <b>No sign-in</b> — klucz jest już w adresie. "
+         "Nie wybieraj „Sign in now”, nawet jeśli aplikacja oznaczy je jako „Detected”.</li>"
+         "<li><b>Request headers</b> zostaw puste i zapisz.</li></ol>"
          "<p class='muted'>Po dodaniu connector działa też w aplikacji mobilnej. "
          "Na telefonie może być potrzebne włączenie go w danej rozmowie.</p>"
          f"<h3>Claude Code</h3>{box(cli)}"),
