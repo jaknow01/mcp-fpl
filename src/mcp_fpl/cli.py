@@ -5,6 +5,7 @@
     mcp-fpl warm-cache [--league ID]    refresh the current gameweek's squad scans (every 3 h)
     mcp-fpl backfill [--league ID] [--from-gw N]   rebuild history from the FPL API
     mcp-fpl keys list | keys revoke ENTRY_ID [--draft]   self-service keys from /join
+    mcp-fpl calls [--days N]            tool-call log: calls, clients, failures, timing per tool
 """
 
 import argparse
@@ -46,6 +47,22 @@ def _keys(args) -> int:
     return 0
 
 
+def _calls(args) -> int:
+    from mcp_fpl.db import connection as dbconn
+    from mcp_fpl.db.call_log_repo import summary
+
+    if not dbconn.is_configured():
+        print("the tool-call log needs DATABASE_URL", file=sys.stderr)
+        return 2
+    rows = summary(args.days)
+    print(f"{'tool':<28} {'calls':>6} {'clients':>8} {'not ok':>7} {'avg ms':>7} {'max ms':>7}")
+    for r in rows:
+        print(f"{r['tool']:<28} {r['calls']:>6} {r['clients']:>8} {r['not_ok']:>7} "
+              f"{r['avg_ms'] if r['avg_ms'] is not None else '-':>7} {r['max_ms'] or '-':>7}")
+    print(f"{sum(r['calls'] for r in rows)} call(s) in the last {args.days} day(s)")
+    return 0
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(prog="mcp-fpl", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -60,6 +77,8 @@ def main(argv=None) -> None:
     p_keys.add_argument("action", choices=["list", "revoke"])
     p_keys.add_argument("entry_id", nargs="?")
     p_keys.add_argument("--draft", action="store_true", help="ENTRY_ID is an FPL Draft team")
+    p_calls = sub.add_parser("calls", help="tool-call log summary")
+    p_calls.add_argument("--days", type=int, default=7)
     args = parser.parse_args(argv)
     setup_logging()
 
@@ -74,6 +93,8 @@ def main(argv=None) -> None:
         code = asyncio.run(jobs.warm_cache(args.league))
     elif args.cmd == "backfill":
         code = asyncio.run(jobs.backfill(args.league, args.from_gw))
+    elif args.cmd == "calls":
+        code = _calls(args)
     else:
         code = _keys(args)
     sys.exit(code)

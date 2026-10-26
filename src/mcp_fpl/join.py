@@ -37,6 +37,7 @@ from starlette.routing import Route
 import httpx2
 from jarvis_mcp_kit import ClientRegistry, hash_key, new_key
 
+from mcp_fpl.call_log import retention_days
 from mcp_fpl.config import draft_league_ids, env_flag, env_int, env_str, league_ids
 from mcp_fpl.draft_api import list_draft_league_managers
 from mcp_fpl.fpl_api import list_league_managers
@@ -257,7 +258,10 @@ def _form(games: list[str], prefill: Optional[dict] = None, note: str = "") -> s
         f"{''.join(fields)}{both}"
         "<button type='submit'>Wygeneruj klucz</button></form>"
         "<p class='muted'>Każda drużyna może mieć tylko jeden klucz. Zgubiłeś swój? Poproś "
-        "administratora ligi o jego unieważnienie i wygeneruj nowy.</p></div>"
+        "administratora ligi o jego unieważnienie i wygeneruj nowy.</p>"
+        "<p class='muted'>Serwer zapisuje wywołania narzędzi (które narzędzie, z jakimi parametrami, "
+        f"dla której drużyny, czas odpowiedzi) przez {retention_days()} dni, żeby je ulepszać. "
+        "Twoich rozmów z agentem nie widzi.</p></div>"
     )
 
 

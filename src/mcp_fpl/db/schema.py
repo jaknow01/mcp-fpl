@@ -67,6 +67,24 @@ SCHEMA_STATEMENTS = [
     CREATE INDEX IF NOT EXISTS mcp_api_keys_active_by_draft_entry
         ON mcp_api_keys (draft_entry_id) WHERE revoked_at IS NULL
     """,
+    # every tool call (for improving the tools): who, which tool, arguments, outcome, timing
+    """
+    CREATE TABLE IF NOT EXISTS fpl_tool_calls (
+        id           BIGSERIAL PRIMARY KEY,
+        called_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        client_id    TEXT,
+        principal    TEXT,
+        tool         TEXT NOT NULL,
+        arguments    JSONB,
+        outcome      TEXT NOT NULL,
+        error        TEXT,
+        duration_ms  INTEGER,
+        result_chars INTEGER,
+        version      TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS fpl_tool_calls_by_time ON fpl_tool_calls (called_at)",
+    "CREATE INDEX IF NOT EXISTS fpl_tool_calls_by_tool ON fpl_tool_calls (tool, called_at)",
 ]
 
 

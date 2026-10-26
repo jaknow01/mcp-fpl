@@ -56,5 +56,14 @@ def _issued_clients():
     return issued_clients()
 
 
-server = ToolServer("fpl", title="FPL", instructions=INSTRUCTIONS,
-                    registry=ClientRegistry(issued=_issued_clients), describe_client=_describe)
+class _LoggedToolServer(ToolServer):
+    """Every tool registered here is wrapped so its calls land in the tool-call log."""
+
+    def add_tool(self, fn, *, name=None, **kwargs) -> None:
+        from mcp_fpl.call_log import recorded
+
+        super().add_tool(recorded(fn, name or fn.__name__), name=name or fn.__name__, **kwargs)
+
+
+server = _LoggedToolServer("fpl", title="FPL", instructions=INSTRUCTIONS,
+                           registry=ClientRegistry(issued=_issued_clients), describe_client=_describe)

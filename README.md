@@ -55,14 +55,21 @@ for every key to `JOIN_NOTIFY_WEBHOOK_URL`.
 ## Storage and jobs
 
 With `DATABASE_URL` (its own Postgres database and login) the server caches reference data and
-league squad scans, keeps a permanent daily league history, and stores issued keys. Without it
+league squad scans, keeps a permanent daily league history, stores issued keys, and logs every
+tool call to `fpl_tool_calls` (client, tool, arguments, outcome, error, duration, result size,
+server version — not the results, and never the users' conversations, which the server does
+not see) to show how the tools are used and where they fail. Without it
 caches stay in memory, history is unavailable and keys go to `$MCP_FPL_DATA_DIR/keys.json`.
 
 ```bash
 mcp-fpl collect          # today's league snapshot for every league in FPL_LEAGUES (cron 04:00)
 mcp-fpl warm-cache       # refresh the current gameweek's squad scans (every few hours)
 mcp-fpl backfill         # rebuild per-gameweek history from the FPL API (once, after deploy)
+mcp-fpl calls --days 7   # tool-call log: calls, clients, failures and timing per tool
 ```
+
+`collect` also deletes logged calls older than `MCP_CALL_LOG_DAYS` (default 180). The join page
+tells users that tool calls are recorded.
 
 ## Run
 
@@ -91,3 +98,4 @@ Ingress); give the server its own hostname and expose `/mcp` and `/join`.
 | `JOIN_NOTIFY_WEBHOOK_URL` / `JOIN_NOTIFY_TOKEN` | where to POST `{"text": …}` for each issued key |
 | `MCP_JOIN_ENABLED`, `MCP_JOIN_PER_HOUR`, `MCP_JOIN_ROSTER_TTL_SECONDS` | join page switches |
 | `FPL_CACHE_TTL_SECONDS`, `FPL_LEAGUE_CACHE_TTL_SECONDS` | cache freshness |
+| `MCP_CALL_LOG`, `MCP_CALL_LOG_DAYS` | tool-call log on/off (default on with a database) and retention in days (180) |
