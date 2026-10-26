@@ -58,6 +58,13 @@ async def _store(row: dict) -> None:
         logger.warning("Tool-call log write failed", exc_info=True)
 
 
+def _schedule(row: dict) -> None:
+    """Write the row in the background, off the request path."""
+    task = asyncio.get_running_loop().create_task(_store(row))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
 def _arguments(fn: Callable, args: tuple, kwargs: dict) -> dict:
     """The call's arguments by name (positional ones included), JSON-safe. Unset (None)
     arguments are left out: the MCP layer passes every optional argument explicitly."""
@@ -107,8 +114,6 @@ def recorded(fn: Callable, tool_name: str) -> Callable:
             return result
         finally:
             row["duration_ms"] = int((time.monotonic() - started) * 1000)
-            task = asyncio.get_running_loop().create_task(_store(row))
-            _background.add(task)
-            task.add_done_callback(_background.discard)
+            _schedule(row)
 
     return wrapper

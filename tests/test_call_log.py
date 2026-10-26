@@ -11,9 +11,10 @@ from mcp_fpl import call_log
 
 @pytest.fixture
 def rows(monkeypatch):
+    """Capture rows as they are scheduled — no dependence on when the background write runs."""
     written = []
     monkeypatch.setattr(call_log, "enabled", lambda: True)
-    monkeypatch.setattr(call_log, "_write", written.append)
+    monkeypatch.setattr(call_log, "_schedule", written.append)
     return written
 
 
@@ -39,7 +40,6 @@ def test_exceptions_are_recorded_and_still_raised(rows):
     async def go():
         with pytest.raises(ValueError):
             await wrapped(7)
-        await asyncio.sleep(0.05)  # let the background write run
 
     asyncio.run(go())
     assert rows[0]["outcome"] == "exception" and "bad input" in rows[0]["error"]
@@ -48,8 +48,10 @@ def test_exceptions_are_recorded_and_still_raised(rows):
 
 def test_a_failing_log_never_breaks_the_call(monkeypatch):
     monkeypatch.setattr(call_log, "enabled", lambda: True)
+    attempts = []
 
     def broken(row):
+        attempts.append(row)
         raise RuntimeError("db down")
 
     monkeypatch.setattr(call_log, "_write", broken)
@@ -60,10 +62,11 @@ def test_a_failing_log_never_breaks_the_call(monkeypatch):
 
     async def go():
         result = await call_log.recorded(ok, "ok")()
-        await asyncio.sleep(0.05)
+        await asyncio.gather(*call_log._background)  # wait for the background write itself
         return result
 
     assert asyncio.run(go()) == {"fine": True}
+    assert len(attempts) == 1
 
 
 def test_off_without_a_database(monkeypatch):
