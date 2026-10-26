@@ -867,6 +867,15 @@ async def get_fpl_live(gameweek: Optional[int] = None,
     if not live_matches and not finished_matches:
         result["note"] = "No matches in this gameweek have kicked off yet."
 
+    if include_my_players and gameweek is None and not live_matches and not finished_matches:
+        # Nothing has kicked off in the round in play: it has not reached its deadline (or
+        # has only just), so squads for it are not public yet — say so instead of a 404.
+        result["my_players"] = {
+            "note": f"Gameweek {gw} has not started, so there is nothing live for the owner's "
+                    "players yet (squads are published after the deadline). For the latest "
+                    "squad and its points use get_my_fpl_squad."}
+        return result
+
     if include_my_players:
         which = resolve_game(game)
         if isinstance(which, dict):
@@ -1298,7 +1307,16 @@ async def get_draft_free_agents(position: Optional[Literal["GKP", "DEF", "MID", 
 
     teams_by_id, elements_by_id, positions_by_id = index_draft_bootstrap(bootstrap)
     owned = {x.get("element") for x in statuses if x.get("owner") is not None}
+    # The draft API has no expected points (ep_next); take them from classic FPL, by player code.
+    expected: dict = {}
+    try:
+        classic = await fetch_fpl_bootstrap()
+        classic_ep = {e.get("code"): e.get("ep_next") for e in classic.get("elements", [])}
+        expected = {el["id"]: classic_ep.get(el.get("code")) for el in elements_by_id.values()}
+    except Exception:
+        logger.warning("Could not load classic expected points for free agents", exc_info=True)
     key = _SORT_KEYS.get(sort_by, "form")
+    value = (lambda e: expected.get(e["id"])) if key == "ep_next" else (lambda e: e.get(key))  # noqa: E731
     pool = []
     for el in elements_by_id.values():
         if el["id"] in owned:
@@ -1308,7 +1326,7 @@ async def get_draft_free_agents(position: Optional[Literal["GKP", "DEF", "MID", 
         if not include_unavailable and el.get("status") in ("i", "s", "u", "n"):
             continue
         pool.append(el)
-    pool.sort(key=lambda e: (_num(e.get(key)), _num(e.get("total_points"))), reverse=True)
+    pool.sort(key=lambda e: (_num(value(e)), _num(e.get("total_points"))), reverse=True)
 
     next_gw = draft_gameweek(game_state, None, prefer="upcoming")
     opponents = {}
@@ -1325,7 +1343,7 @@ async def get_draft_free_agents(position: Optional[Literal["GKP", "DEF", "MID", 
     players = []
     for el in pool[: max(1, limit)]:
         info = describe_draft_player(el, teams_by_id, positions_by_id)
-        info.update({"points_per_game": el.get("points_per_game"), "expected_points": el.get("ep_next"),
+        info.update({"points_per_game": el.get("points_per_game"), "expected_points": expected.get(el["id"]),
                      "next_fixtures": opponents.get(el.get("team"), [])})
         players.append(info)
     league = DraftLeague(details)
@@ -1448,6 +1466,10 @@ async def get_draft_activity(kind: Literal["transactions", "trades", "draft"] = 
                           "team_name": who["team_name"] or c.get("entry_name"),
                           "player": player(c.get("element")), "auto_pick": c.get("was_auto")})
 
-    return {"game": "draft", "league_id": lid, "league_name": league.name, "kind": kind,
-            "count": len(items[: max(1, limit)]), "total_matching": len(items),
-            "items": items[: max(1, limit)]}
+    out = {"game": "draft", "league_id": lid, "league_name": league.name, "kind": kind,
+           "count": len(items[: max(1, limit)]), "total_matching": len(items),
+           "items": items[: max(1, limit)]}
+    if kind == "draft" and not data.get("choices"):
+        out["message"] = ("FPL publishes no draft picks for this league (the list is empty in the "
+                          "FPL Draft API), so the draft order is not available.")
+    return out

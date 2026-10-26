@@ -281,3 +281,44 @@ def test_missing_draft_ids_say_so():
         assert "Draft league" in run(ft.get_draft_free_agents())["Error"]
     with acting_as(_caller(draft_league_id=5), None):
         assert "Draft team" in run(ft.get_my_fpl_squad())["Error"]
+
+
+def test_free_agents_take_expected_points_from_classic(draft_api_fake, draft_caller, monkeypatch):
+    # the draft API has no ep_next; classic does (matched by code, so NewSigning 600 → 650)
+    classic = {**CLASSIC_BOOTSTRAP, "elements": [
+        {**e, "ep_next": {650: "8.5", 2: "4.0", 4: "1.0"}.get(e["id"], "0.0")} for e in CLASSIC_BOOTSTRAP["elements"]]}
+    draft = {**DRAFT_BOOTSTRAP, "elements": [{**e, "ep_next": None} for e in DRAFT_BOOTSTRAP["elements"]]}
+
+    async def classic_boot(force=False):
+        return classic
+
+    async def draft_boot(force=False):
+        return draft
+
+    monkeypatch.setattr(ft, "fetch_fpl_bootstrap", classic_boot)
+    monkeypatch.setattr(ft, "fetch_draft_bootstrap", draft_boot)
+    out = run(ft.get_draft_free_agents(sort_by="expected_points", limit=3))
+    assert [(p["name"], p["expected_points"]) for p in out["players"]] == [
+        ("NewSigning", "8.5"), ("Saliba", "4.0"), ("Gvardiol", "1.0")]
+
+
+def test_empty_draft_picks_are_explained(draft_api_fake, draft_caller, monkeypatch):
+    real = ft.fetch_draft
+
+    async def no_choices(path):
+        return {"choices": []} if path.startswith("draft/1000/choices") else await real(path)
+
+    monkeypatch.setattr(ft, "fetch_draft", no_choices)
+    out = run(ft.get_draft_activity(kind="draft"))
+    assert out["items"] == [] and "no draft picks" in out["message"]
+
+
+def test_live_before_the_gameweek_starts_explains_instead_of_404(draft_api_fake, draft_caller, monkeypatch):
+    async def nothing_started(force=False):
+        return {**CLASSIC_BOOTSTRAP, "events": [{"id": 8, "is_current": True, "finished": True},
+                                                {"id": 9, "is_next": True, "finished": False}]}
+
+    monkeypatch.setattr(ft, "fetch_fpl_bootstrap", nothing_started)
+    out = run(ft.get_fpl_live())
+    assert out["gameweek"] == 9 and not out["any_live"]
+    assert "has not started" in out["my_players"]["note"]
