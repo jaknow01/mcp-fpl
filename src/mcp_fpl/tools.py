@@ -1,6 +1,6 @@
 """Fantasy Premier League tools: fixtures/FDR, PL teams, players, the caller's squad,
 mini-league standings/ownership/history and live in-play data — all from the keyless public
-FPL API.
+FPL API — for classic FPL and FPL Draft (``game="classic"|"draft"``, see identity.py).
 
 Numeric team/player/gameweek ids are resolved to human-readable names server-side (via
 the bootstrap-static reference data in fpl_api), so the model — and the user — only ever
@@ -13,10 +13,29 @@ from typing import Literal, Optional
 
 from mcp_fpl.server import server
 from mcp_fpl.identity import (
+    linked_games,
+    resolve_draft_entry_id,
+    resolve_draft_league_id,
     resolve_entry_id,
+    resolve_game,
     resolve_league_id,
     missing_entry_tip,
     missing_league_tip,
+)
+from mcp_fpl.draft_api import (
+    TRADE_STATES,
+    TRANSACTION_KINDS,
+    TRANSACTION_RESULTS,
+    DraftLeague,
+    classic_ids_by_draft_id,
+    describe_draft_player,
+    draft_gameweek,
+    fetch_draft,
+    fetch_draft_bootstrap,
+    fetch_draft_element_status,
+    fetch_draft_game,
+    fetch_draft_league,
+    index_draft_bootstrap,
 )
 from mcp_fpl.fpl_api import (
     fetch_fpl,
@@ -44,6 +63,27 @@ def _fpl_entry_id(override: Optional[int]) -> Optional[int]:
 
 def _fpl_league_id(override: Optional[int]) -> Optional[int]:
     return resolve_league_id(override)
+
+
+Game = Optional[Literal["classic", "draft"]]
+
+
+def _no_draft_entry() -> dict:
+    return {"Error": "No FPL Draft team id is configured.", "Tip": missing_entry_tip("draft")}
+
+
+def _no_draft_league() -> dict:
+    return {"Error": "No FPL Draft league id is configured.", "Tip": missing_league_tip("draft")}
+
+
+def _draft_only_caller(league_id: Optional[int]) -> bool:
+    """True when the caller only plays Draft and named no league; used by classic-only tools."""
+    return league_id is None and linked_games() == ["draft"]
+
+
+def _live_points(live: dict) -> dict:
+    """Draft ``event/{gw}/live``: element id -> that gameweek's stats (keys are strings)."""
+    return {int(k): (v or {}).get("stats", {}) for k, v in (live.get("elements") or {}).items()}
 
 
 @server.tool()
@@ -215,13 +255,16 @@ async def get_fpl_player(name: str, upcoming_fixtures: int = 5) -> dict:
 
 @server.tool()
 async def get_my_fpl_squad(gameweek: Optional[int] = None,
-                           entry_id: Optional[int] = None) -> dict:
+                           entry_id: Optional[int] = None,
+                           game: Game = None) -> dict:
     """
     Description:
         Returns the owner's Fantasy Premier League squad (the 15 players picked) for a
         gameweek, with each player resolved to name/team/position, the captain and
         vice-captain marked, and the starting XI vs. bench split. Also reports that
-        gameweek's points, squad value and money in the bank.
+        gameweek's points, squad value and money in the bank. In FPL Draft there is no
+        captain, value or bank: it returns the XI + bench with each player's points for the
+        gameweek and the automatic substitutions made.
 
     Parameters:
     gameweek: Optional[int] = None
@@ -229,14 +272,23 @@ async def get_my_fpl_squad(gameweek: Optional[int] = None,
         Note: a squad only becomes public after that gameweek's deadline has passed.
 
     entry_id: Optional[int] = None
-        The FPL manager ("entry") id to look up. If omitted, the owner's
-        configured default manager id is used.
+        The manager ("entry") id to look up — a classic or a Draft id depending on `game`.
+        If omitted, the owner's configured default team for that game is used.
+
+    game: "classic" | "draft" | None = None
+        Which game: classic FPL or FPL Draft (separate games with separate ids). Leave it
+        out when the owner's key is linked to one game only; the tool then uses that game.
 
     Output:
         JSON object with the resolved gameweek, a per-gameweek summary (points, bank,
         squad value) and the list of picked players (starting XI first, then bench),
         each flagged with captaincy and whether they are on the bench.
     """
+    which = resolve_game(game)
+    if isinstance(which, dict):
+        return which
+    if which == "draft":
+        return await _draft_squad(gameweek, entry_id)
     eid = _fpl_entry_id(entry_id)
     if eid is None:
         return {
@@ -286,24 +338,112 @@ async def get_my_fpl_squad(gameweek: Optional[int] = None,
     }
 
 
+async def _draft_squad(gameweek: Optional[int], entry_id: Optional[int]) -> dict:
+    eid = resolve_draft_entry_id(entry_id)
+    if eid is None:
+        return _no_draft_entry()
+    logger.info(f"Getting FPL Draft squad for entry={eid}, gameweek={gameweek or 'current'}")
+    gw = None
+    try:
+        bootstrap = await fetch_draft_bootstrap()
+        gw = draft_gameweek(await fetch_draft_game(), gameweek)
+        if gw is None:
+            return {"Error": "Could not determine a gameweek (no current Draft gameweek)."}
+        teams_by_id, elements_by_id, positions_by_id = index_draft_bootstrap(bootstrap)
+        picks_data, live, history = await asyncio.gather(
+            fetch_draft(f"entry/{eid}/event/{gw}"), fetch_draft(f"event/{gw}/live"),
+            fetch_draft(f"entry/{eid}/history"))
+    except Exception as e:
+        return fpl_error("Error while getting the FPL Draft squad", e, gameweek=gw)
+
+    stats = _live_points(live)
+    players = []
+    for p in picks_data.get("picks", []):
+        info = describe_draft_player(elements_by_id.get(p.get("element"), {}), teams_by_id, positions_by_id)
+        info["on_bench"] = p.get("position", 0) > 11  # positions 1-11 = XI, 12-15 = bench in order
+        info["gameweek_points"] = stats.get(p.get("element"), {}).get("total_points")
+        players.append(info)
+    name = lambda el: elements_by_id.get(el, {}).get("web_name")  # noqa: E731
+    subs = [{"in": name(x.get("element_in")), "out": name(x.get("element_out"))}
+            for x in picks_data.get("subs", []) or []]
+    row = next((h for h in history.get("history", []) if h.get("event") == gw), {})
+    return {
+        "game": "draft",
+        "entry_id": eid,
+        "team_name": (history.get("entry") or {}).get("name"),
+        "gameweek": gw,
+        "summary": {"gameweek_points": row.get("points"), "total_points": row.get("total_points"),
+                    "points_on_bench": row.get("points_on_bench")},
+        "squad": players,
+        "automatic_subs": subs,
+    }
+
+
 @server.tool()
-async def get_my_fpl_leagues(entry_id: Optional[int] = None) -> dict:
+async def get_my_fpl_leagues(entry_id: Optional[int] = None, game: Game = None) -> dict:
     """
     Description:
-        Lists the classic (points-based) mini-leagues the owner's Fantasy Premier League
-        manager is a member of, with the manager's current rank in each. Use this to
-        discover league ids (e.g. to then fetch a specific league's standings) or to
-        answer "which leagues am I in / what's my rank".
+        Lists the mini-leagues the owner's manager is a member of, with the manager's current
+        rank in each: classic (points-based) leagues and/or FPL Draft leagues (points or
+        head-to-head). Use this to discover league ids (e.g. to then fetch a specific
+        league's standings) or to answer "which leagues am I in / what's my rank".
 
     Parameters:
     entry_id: Optional[int] = None
-        The FPL manager ("entry") id. If omitted, the owner's configured
-        default manager id is used.
+        The manager ("entry") id — a classic or a Draft id depending on `game` (classic
+        when `game` is omitted). If omitted, the owner's configured default team(s) are used.
+
+    game: "classic" | "draft" | None = None
+        Limit the answer to one game. If omitted, every game the owner's key is linked to
+        is listed (both, for a key linked to a classic and a Draft team).
 
     Output:
-        JSON object with the manager's name and a list of their classic leagues
-        (league id, name, and the manager's rank in it).
+        For one game: the manager's name and their leagues (league id, name, the manager's
+        rank; Draft leagues also say whether they are points or head-to-head). For both
+        games: the same under `classic` and `draft`.
     """
+    if game in ("classic", "draft"):
+        games = [game]
+    elif entry_id is not None:
+        games = ["classic"]
+    else:
+        games = linked_games() or ["classic"]
+    if games == ["draft"]:
+        return await _draft_leagues(entry_id)
+    if games == ["classic"]:
+        return await _classic_leagues(entry_id)
+    return {"classic": await _classic_leagues(None), "draft": await _draft_leagues(None)}
+
+
+async def _draft_leagues(entry_id: Optional[int]) -> dict:
+    eid = resolve_draft_entry_id(entry_id)
+    if eid is None:
+        return _no_draft_entry()
+    logger.info(f"Getting FPL Draft leagues for entry={eid}")
+    try:
+        entry = (await fetch_draft(f"entry/{eid}/public")).get("entry", {}) or {}
+        details = await asyncio.gather(*(fetch_draft_league(lid) for lid in entry.get("league_set", [])))
+    except Exception as e:
+        return fpl_error("Error while getting the manager's FPL Draft leagues", e)
+
+    leagues = []
+    for d in details:
+        league = DraftLeague(d)
+        me = next((e for e in league.entries if e.get("entry_id") == eid), {})
+        row = next((r for r in d.get("standings", []) if r.get("league_entry") == me.get("id")), {})
+        leagues.append({"id": league.league.get("id"), "name": league.name,
+                        "scoring": "head-to-head" if league.is_h2h else "points",
+                        "my_rank": row.get("rank")})
+    return {
+        "game": "draft",
+        "manager_name": f"{entry.get('player_first_name', '')} {entry.get('player_last_name', '')}".strip(),
+        "team_name": entry.get("name"),
+        "leagues_count": len(leagues),
+        "leagues": leagues,
+    }
+
+
+async def _classic_leagues(entry_id: Optional[int]) -> dict:
     eid = _fpl_entry_id(entry_id)
     if eid is None:
         return {
@@ -330,27 +470,44 @@ async def get_my_fpl_leagues(entry_id: Optional[int] = None) -> dict:
 
 @server.tool()
 async def get_fpl_league_standings(league_id: Optional[int] = None,
-                                   limit: int = 25) -> dict:
+                                   limit: int = 25,
+                                   game: Game = None,
+                                   gameweek: Optional[int] = None) -> dict:
     """
     Description:
-        Returns the standings (table) of a Fantasy Premier League classic mini-league:
-        the ranked managers with their team name, total points and last-gameweek
-        points. The owner's own row is flagged. Use this for "how's my league doing /
-        what's the table in my league".
+        Returns the standings (table) of a mini-league: the ranked managers with their team
+        name, total points and last-gameweek points. The owner's own row is flagged. Use this
+        for "how's my league doing / what's the table in my league". For an FPL Draft
+        head-to-head league the table has wins/draws/losses and league points, and the
+        gameweek's head-to-head matches are included ("who do I play this week").
 
     Parameters:
     league_id: Optional[int] = None
-        The classic league id to fetch. If omitted, the owner's configured
-        default league is used. Use get_my_fpl_leagues to discover
+        The league id to fetch — a classic or a Draft id depending on `game`. If omitted,
+        the owner's configured default league is used. Use get_my_fpl_leagues to discover
         league ids.
 
     limit: int = 25
         Maximum number of ranked entries to return (from the top of the table).
 
+    game: "classic" | "draft" | None = None
+        Which game: classic FPL or FPL Draft (separate games with separate ids). Leave it
+        out when the owner's key is linked to one game only; the tool then uses that game.
+
+    gameweek: Optional[int] = None
+        Draft head-to-head leagues only: whose matches to list. If omitted, the gameweek in
+        play — the current one, or the next one once the current one has finished.
+
     Output:
         JSON object with the league name and the ranked standings (rank, team name,
-        manager name, total points, last-gameweek points), with the owner's row marked.
+        manager name, total points, last-gameweek points), with the owner's row marked;
+        for a Draft H2H league also `matches` for the gameweek.
     """
+    which = resolve_game(game)
+    if isinstance(which, dict):
+        return which
+    if which == "draft":
+        return await _draft_standings(league_id, limit, gameweek)
     lid = _fpl_league_id(league_id)
     if lid is None:
         return {
@@ -382,6 +539,55 @@ async def get_fpl_league_standings(league_id: Optional[int] = None,
         "entries_shown": len(table),
         "standings": table,
     }
+
+
+async def _draft_standings(league_id: Optional[int], limit: int, gameweek: Optional[int]) -> dict:
+    lid = resolve_draft_league_id(league_id)
+    if lid is None:
+        return _no_draft_league()
+    logger.info(f"Getting FPL Draft standings for league={lid}")
+    try:
+        details = await fetch_draft_league(lid)
+        game_state = await fetch_draft_game()
+    except Exception as e:
+        return fpl_error("Error while getting the FPL Draft league", e)
+
+    league = DraftLeague(details)
+    my_entry = resolve_draft_entry_id(None)
+    table = []
+    for r in (details.get("standings") or [])[: max(1, limit)]:
+        who = league.by_league_entry_id(r.get("league_entry"))
+        row = {"rank": r.get("rank"), "team_name": who["team_name"], "manager": who["manager"],
+               "is_me": my_entry is not None and who["entry_id"] == my_entry}
+        if league.is_h2h:
+            row.update({"league_points": r.get("total"), "won": r.get("matches_won"),
+                        "drawn": r.get("matches_drawn"), "lost": r.get("matches_lost"),
+                        "points_for": r.get("points_for"), "points_against": r.get("points_against")})
+        else:
+            row.update({"total_points": r.get("total"), "gameweek_points": r.get("event_total")})
+        table.append(row)
+
+    out = {"game": "draft", "league_id": lid, "league_name": league.name,
+           "scoring": "head-to-head" if league.is_h2h else "points",
+           "entries_shown": len(table), "standings": table}
+    if league.is_h2h:
+        gw = draft_gameweek(game_state, gameweek, prefer="upcoming")
+        matches = []
+        for m in details.get("matches") or []:
+            if m.get("event") != gw:
+                continue
+            home = league.by_league_entry_id(m.get("league_entry_1"))
+            away = league.by_league_entry_id(m.get("league_entry_2"))
+            match = {"team_1": home["team_name"], "manager_1": home["manager"],
+                     "team_2": away["team_name"], "manager_2": away["manager"],
+                     "started": m.get("started"), "finished": m.get("finished"),
+                     "involves_me": my_entry is not None and my_entry in (home["entry_id"], away["entry_id"])}
+            if m.get("started"):
+                match["score"] = f"{m.get('league_entry_1_points')}-{m.get('league_entry_2_points')}"
+            matches.append(match)
+        out["matches_gameweek"] = gw
+        out["matches"] = matches
+    return out
 
 
 def _manager_matches(entry_row: dict, query: str) -> bool:
@@ -430,8 +636,12 @@ async def get_league_history(view: Literal["standings", "squads"] = "standings",
     Output:
         JSON with the resolved league/window and the requested view; or a message when no
         history has been recorded yet (the collector needs a configured database and at least
-        one daily run, or a backfill).
+        one daily run, or a backfill). Classic leagues only (no Draft history yet).
     """
+    if _draft_only_caller(league_id):
+        return {"message": "League history is recorded for classic FPL leagues only; there is no "
+                           "FPL Draft history yet. For the current Draft table use "
+                           "get_fpl_league_standings."}
     lid = _fpl_league_id(league_id)
     if lid is None:
         return {
@@ -574,7 +784,8 @@ def _player_playing_status(match_state: dict, stats: dict) -> str:
 @server.tool()
 async def get_fpl_live(gameweek: Optional[int] = None,
                        include_my_players: bool = True,
-                       entry_id: Optional[int] = None) -> dict:
+                       entry_id: Optional[int] = None,
+                       game: Game = None) -> dict:
     """
     Description:
         Real-time state of the gameweek: which Premier League matches are being played
@@ -600,8 +811,12 @@ async def get_fpl_live(gameweek: Optional[int] = None,
         to only get the match scores/events (e.g. when no manager id is configured).
 
     entry_id: Optional[int] = None
-        The FPL manager ("entry") id for the squad section. If omitted, the owner's
-        configured default manager id is used.
+        The manager ("entry") id for the squad section — a classic or a Draft id depending
+        on `game`. If omitted, the owner's configured default team for that game is used.
+
+    game: "classic" | "draft" | None = None
+        Whose squad `my_players` follows: the classic FPL team or the FPL Draft team. Leave it
+        out when the owner's key is linked to one game only. Match scores are the same for both.
 
     Output:
         JSON object with `any_live` (is any match in play), `live_matches` (in-progress
@@ -653,16 +868,23 @@ async def get_fpl_live(gameweek: Optional[int] = None,
         result["note"] = "No matches in this gameweek have kicked off yet."
 
     if include_my_players:
-        eid = _fpl_entry_id(entry_id)
+        which = resolve_game(game)
+        if isinstance(which, dict):
+            result["my_players"] = which
+            return result
+        eid = resolve_draft_entry_id(entry_id) if which == "draft" else _fpl_entry_id(entry_id)
         if eid is None:
-            result["my_players"] = {
+            result["my_players"] = _no_draft_entry() if which == "draft" else {
                 "Error": "No FPL manager id is configured.",
                 "Tip": missing_entry_tip(),
             }
             return result
         try:
             live_data = await fetch_fpl(f"event/{gw}/live/")
-            picks_data = await fetch_fpl(f"entry/{eid}/event/{gw}/picks/")
+            if which == "draft":
+                picks = await _draft_picks_as_classic(eid, gw, bootstrap)
+            else:
+                picks = (await fetch_fpl(f"entry/{eid}/event/{gw}/picks/")).get("picks", [])
         except Exception as e:
             result["my_players"] = fpl_error(
                 "Error while getting the squad's live performance", e,
@@ -687,7 +909,7 @@ async def get_fpl_live(gameweek: Optional[int] = None,
 
         players = []
         provisional_points = 0
-        for p in picks_data.get("picks", []):
+        for p in picks:
             element = elements_by_id.get(p.get("element"), {})
             stats = live_by_element.get(p.get("element"), {})
             team_id = element.get("team")
@@ -727,6 +949,7 @@ async def get_fpl_live(gameweek: Optional[int] = None,
         ]
 
         result["my_players"] = {
+            "game": which,
             "entry_id": eid,
             "provisional_gameweek_points": provisional_points,
             "starters_not_playing": starters_not_playing,
@@ -741,17 +964,33 @@ async def get_fpl_live(gameweek: Optional[int] = None,
     return result
 
 
+async def _draft_picks_as_classic(entry_id: int, gw: int, classic_bootstrap: dict) -> list[dict]:
+    """A Draft squad as classic-shaped picks (classic element ids, matched on the player's
+    code), so the live view can reuse the classic live feed. Draft has no captain; the
+    bench (positions 12-15) counts zero until FPL Draft makes an automatic substitution."""
+    draft_bootstrap = await fetch_draft_bootstrap()
+    picks = (await fetch_draft(f"entry/{entry_id}/event/{gw}")).get("picks", [])
+    to_classic = classic_ids_by_draft_id(draft_bootstrap, classic_bootstrap)
+    return [{"element": to_classic.get(p.get("element")), "position": p.get("position", 0),
+             "multiplier": 1 if p.get("position", 0) <= 11 else 0,
+             "is_captain": False, "is_vice_captain": False}
+            for p in picks]
+
+
 @server.tool()
 async def who_owns_player_in_league(player: str,
                                     league_id: Optional[int] = None,
                                     gameweek: Optional[int] = None,
-                                    max_managers: int = _LEAGUE_SCAN_DEFAULT) -> dict:
+                                    max_managers: int = _LEAGUE_SCAN_DEFAULT,
+                                    game: Game = None) -> dict:
     """
     Description:
         Finds which managers in a Fantasy Premier League mini-league own a given player,
         and how many. Answers questions like "does anyone else in my league have Dalot"
         or "how many people have Haaland". It scans each manager's squad for the
         gameweek, so it also knows who has captained the player or has him on their bench.
+        In an FPL Draft league a player has at most one owner: the answer is that manager,
+        or that the player is free to pick up (waivers / free agency).
 
     Parameters:
     player: str
@@ -769,11 +1008,21 @@ async def who_owns_player_in_league(player: str,
     max_managers: int = 50
         Safety cap on how many managers (from the top of the table by rank) to scan.
 
+    game: "classic" | "draft" | None = None
+        Which game: classic FPL or FPL Draft (separate games with separate ids). Leave it
+        out when the owner's key is linked to one game only; the tool then uses that game.
+
     Output:
         JSON object with the resolved player, the league, how many of the scanned
         managers own the player (with in-league ownership %) and the list of owners
-        (manager, team name, rank, whether captained or benched by them).
+        (manager, team name, rank, whether captained or benched by them). Draft: the
+        owner (or none) and whether the player is available.
     """
+    which = resolve_game(game)
+    if isinstance(which, dict):
+        return which
+    if which == "draft":
+        return await _draft_owner(player, league_id)
     lid = _fpl_league_id(league_id)
     if lid is None:
         return {
@@ -846,6 +1095,57 @@ async def who_owns_player_in_league(player: str,
     }
 
 
+def _ambiguous_players(query: str, matches: list[dict], teams_by_id: dict) -> dict:
+    return {
+        "ambiguous_player": query,
+        "candidates": [
+            {"name": m.get("web_name"),
+             "full_name": f"{m.get('first_name', '')} {m.get('second_name', '')}".strip(),
+             "team": teams_by_id.get(m.get("team"), {}).get("short_name")}
+            for m in matches[:10]
+        ],
+        "Tip": "Ask the user which player they meant, then call again with a more specific name.",
+    }
+
+
+async def _draft_owner(player: str, league_id: Optional[int]) -> dict:
+    lid = resolve_draft_league_id(league_id)
+    if lid is None:
+        return _no_draft_league()
+    logger.info(f"Looking up the owner of '{player}' in FPL Draft league {lid}")
+    try:
+        bootstrap = await fetch_draft_bootstrap()
+        statuses, details = await asyncio.gather(fetch_draft_element_status(lid), fetch_draft_league(lid))
+    except Exception as e:
+        return fpl_error("Error while checking the FPL Draft league", e)
+
+    teams_by_id, _, positions_by_id = index_draft_bootstrap(bootstrap)
+    matches = find_players_by_name(bootstrap, player)
+    if not matches:
+        return {"Error": f"No FPL player matched '{player}'."}
+    if len(matches) > 1:
+        return _ambiguous_players(player, matches, teams_by_id)
+
+    target = matches[0]
+    league = DraftLeague(details)
+    status = next((x for x in statuses if x.get("element") == target["id"]), {})
+    owner = status.get("owner")
+    my_entry = resolve_draft_entry_id(None)
+    out = {"game": "draft", **describe_draft_player(target, teams_by_id, positions_by_id),
+           "league_id": lid, "league_name": league.name}
+    if owner is not None:
+        out["owned"] = True
+        out["owner"] = {**league.by_entry(owner), "is_me": owner == my_entry}
+        out["in_pending_trade"] = bool(status.get("in_accepted_trade"))
+    else:
+        out["owned"] = False
+        out["available_via"] = ("waivers" if league.transaction_mode == "waivers" else "free agency")
+        out["note"] = ("Unowned in this league. Under waivers a claim is processed at the waiver "
+                       "deadline by waiver priority; outside the waiver window it can be picked up "
+                       "as a free agent.")
+    return out
+
+
 @server.tool()
 async def get_league_ownership(league_id: Optional[int] = None,
                                gameweek: Optional[int] = None,
@@ -876,8 +1176,13 @@ async def get_league_ownership(league_id: Optional[int] = None,
     Output:
         JSON object with the league, how many managers were scanned and the most-owned
         players (name, team, position, how many managers own them, in-league ownership %
-        and how many captained them).
+        and how many captained them). Classic leagues only: in FPL Draft every player has at
+        most one owner — use who_owns_player_in_league or get_draft_free_agents instead.
     """
+    if _draft_only_caller(league_id):
+        return {"message": "Ownership rankings only make sense in classic FPL: in a Draft league each "
+                           "player belongs to at most one manager. Use who_owns_player_in_league "
+                           "(who has a player) or get_draft_free_agents (who is still free)."}
     lid = _fpl_league_id(league_id)
     if lid is None:
         return {
@@ -931,3 +1236,218 @@ async def get_league_ownership(league_id: Optional[int] = None,
         "top_owned": top_owned,
     }
 
+
+_POSITIONS = {"GKP": 1, "DEF": 2, "MID": 3, "FWD": 4}
+_SORT_KEYS = {"form": "form", "total_points": "total_points", "points_per_game": "points_per_game",
+              "expected_points": "ep_next"}
+
+
+def _num(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+@server.tool()
+async def get_draft_free_agents(position: Optional[Literal["GKP", "DEF", "MID", "FWD"]] = None,
+                                sort_by: Literal["form", "total_points", "points_per_game",
+                                                 "expected_points"] = "form",
+                                limit: int = 15,
+                                include_unavailable: bool = False,
+                                league_id: Optional[int] = None) -> dict:
+    """
+    Description:
+        FPL Draft only. The best players nobody owns in the owner's Draft league — the
+        waiver / free-agent targets — ranked by form, total points, points per game or
+        expected points next gameweek, with each player's next opponent and its FDR. Use it
+        for "who should I pick up / who is on the waiver wire / best free defender".
+
+    Parameters:
+    position: "GKP" | "DEF" | "MID" | "FWD" | None = None
+        Only players in this position. If omitted, all positions.
+
+    sort_by: "form" | "total_points" | "points_per_game" | "expected_points" = "form"
+        How to rank the free players (expected_points = FPL's expected points next gameweek).
+
+    limit: int = 15
+        How many players to return.
+
+    include_unavailable: bool = False
+        Also list injured, suspended or otherwise unavailable players (doubtful ones are
+        always listed, with their news).
+
+    league_id: Optional[int] = None
+        The Draft league. If omitted, the owner's configured default Draft league is used.
+
+    Output:
+        JSON with the league, how players can be added there (waivers or free agency) and the
+        ranked free players (name, team, position, form, points, points per game, expected
+        points, availability news and next fixture with difficulty 1-5).
+    """
+    lid = resolve_draft_league_id(league_id)
+    if lid is None:
+        return _no_draft_league()
+    logger.info(f"Listing FPL Draft free agents in league {lid} (position={position}, sort={sort_by})")
+    try:
+        bootstrap = await fetch_draft_bootstrap()
+        statuses, details, game_state = await asyncio.gather(
+            fetch_draft_element_status(lid), fetch_draft_league(lid), fetch_draft_game())
+    except Exception as e:
+        return fpl_error("Error while listing FPL Draft free agents", e)
+
+    teams_by_id, elements_by_id, positions_by_id = index_draft_bootstrap(bootstrap)
+    owned = {x.get("element") for x in statuses if x.get("owner") is not None}
+    key = _SORT_KEYS.get(sort_by, "form")
+    pool = []
+    for el in elements_by_id.values():
+        if el["id"] in owned:
+            continue
+        if position and el.get("element_type") != _POSITIONS[position]:
+            continue
+        if not include_unavailable and el.get("status") in ("i", "s", "u", "n"):
+            continue
+        pool.append(el)
+    pool.sort(key=lambda e: (_num(e.get(key)), _num(e.get("total_points"))), reverse=True)
+
+    next_gw = draft_gameweek(game_state, None, prefer="upcoming")
+    opponents = {}
+    try:  # difficulty comes from the classic fixtures (team ids are the same in both games)
+        for f in await fetch_fpl(f"fixtures/?event={next_gw}") if next_gw else []:
+            for team, opp, diff, venue in ((f.get("team_h"), f.get("team_a"), f.get("team_h_difficulty"), "H"),
+                                           (f.get("team_a"), f.get("team_h"), f.get("team_a_difficulty"), "A")):
+                opponents.setdefault(team, []).append(
+                    {"opponent": teams_by_id.get(opp, {}).get("short_name"), "home_or_away": venue,
+                     "difficulty": diff})
+    except Exception:
+        logger.warning("Could not fetch next fixtures for free agents", exc_info=True)
+
+    players = []
+    for el in pool[: max(1, limit)]:
+        info = describe_draft_player(el, teams_by_id, positions_by_id)
+        info.update({"points_per_game": el.get("points_per_game"), "expected_points": el.get("ep_next"),
+                     "next_fixtures": opponents.get(el.get("team"), [])})
+        players.append(info)
+    league = DraftLeague(details)
+    return {
+        "game": "draft", "league_id": lid, "league_name": league.name,
+        "adding_players": league.transaction_mode,
+        "next_gameweek": next_gw, "sorted_by": sort_by, "position": position,
+        "players": players,
+    }
+
+
+@server.tool()
+async def get_draft_activity(kind: Literal["transactions", "trades", "draft"] = "transactions",
+                             gameweek: Optional[int] = None,
+                             manager: Optional[str] = None,
+                             include_denied: bool = False,
+                             limit: int = 30,
+                             league_id: Optional[int] = None) -> dict:
+    """
+    Description:
+        FPL Draft only. What has happened in the owner's Draft league: waiver claims and
+        free-agent pickups ("transactions"), trades between managers ("trades"), or the
+        original draft picks in order ("draft"). Use it for "who did X pick up", "what moves
+        happened this week", "who traded with whom", "who did I draft in round 1".
+
+    Parameters:
+    kind: "transactions" | "trades" | "draft" = "transactions"
+        Which activity to list.
+
+    gameweek: Optional[int] = None
+        Only activity for this gameweek (transactions and trades). If omitted, all of it.
+
+    manager: Optional[str] = None
+        Only activity involving this manager — free text matched against the manager's
+        name or team name (e.g. 'Kuba', 'Wombat FC').
+
+    include_denied: bool = False
+        Transactions only: also list waiver claims that failed (outbid by a higher waiver
+        priority, or no longer valid). Useful for "who else wanted that player".
+
+    limit: int = 30
+        How many items to return (newest first; draft picks in pick order).
+
+    league_id: Optional[int] = None
+        The Draft league. If omitted, the owner's configured default Draft league is used.
+
+    Output:
+        JSON with the league and a list of items with player names resolved: transactions
+        (gameweek, manager, waiver/free agent, player in/out, result), trades (gameweek,
+        offering and receiving manager, players each side gets, state) or draft picks
+        (overall pick number, round, pick within the round, manager, player).
+    """
+    lid = resolve_draft_league_id(league_id)
+    if lid is None:
+        return _no_draft_league()
+    logger.info(f"Getting FPL Draft {kind} for league {lid}")
+    path = {"transactions": f"draft/league/{lid}/transactions", "trades": f"draft/league/{lid}/trades",
+            "draft": f"draft/{lid}/choices"}[kind]
+    try:
+        bootstrap = await fetch_draft_bootstrap()
+        data, details = await asyncio.gather(fetch_draft(path), fetch_draft_league(lid))
+    except Exception as e:
+        return fpl_error(f"Error while getting the FPL Draft {kind}", e)
+
+    teams_by_id, elements_by_id, _ = index_draft_bootstrap(bootstrap)
+    league = DraftLeague(details)
+
+    def player(el) -> Optional[str]:
+        e = elements_by_id.get(el)
+        if not e:
+            return None
+        return f"{e.get('web_name')} ({teams_by_id.get(e.get('team'), {}).get('short_name')})"
+
+    wanted = None
+    if manager:
+        wanted = {e.get("entry_id") for e in league.find_manager(manager)}
+        if not wanted:
+            return {"game": "draft", "league_id": lid, "league_name": league.name,
+                    "message": f"No manager in this league matches '{manager}'."}
+
+    items = []
+    if kind == "transactions":
+        for t in sorted(data.get("transactions", []), key=lambda t: t.get("added") or "", reverse=True):
+            if gameweek is not None and t.get("event") != gameweek:
+                continue
+            if wanted is not None and t.get("entry") not in wanted:
+                continue
+            if not include_denied and t.get("result") != "a":
+                continue
+            who = league.by_entry(t.get("entry"))
+            items.append({"gameweek": t.get("event"), "manager": who["manager"], "team_name": who["team_name"],
+                          "type": TRANSACTION_KINDS.get(t.get("kind"), t.get("kind")),
+                          "player_in": player(t.get("element_in")), "player_out": player(t.get("element_out")),
+                          "result": TRANSACTION_RESULTS.get(t.get("result"), t.get("result")),
+                          "time": t.get("added")})
+    elif kind == "trades":
+        for t in sorted(data.get("trades", []), key=lambda t: t.get("offer_time") or "", reverse=True):
+            if gameweek is not None and t.get("event") != gameweek:
+                continue
+            if wanted is not None and not wanted & {t.get("offered_entry"), t.get("received_entry")}:
+                continue
+            offered, received = league.by_entry(t.get("offered_entry")), league.by_entry(t.get("received_entry"))
+            items_ = t.get("tradeitem_set", []) or []
+            items.append({"gameweek": t.get("event"),
+                          "offered_by": offered["manager"], "offered_by_team": offered["team_name"],
+                          "offered_to": received["manager"], "offered_to_team": received["team_name"],
+                          # element_in goes to the offering manager, element_out leaves them
+                          "offered_by_gets": [player(i.get("element_in")) for i in items_],
+                          "offered_to_gets": [player(i.get("element_out")) for i in items_],
+                          "state": TRADE_STATES.get(t.get("state"), t.get("state")),
+                          "time": t.get("offer_time")})
+    else:
+        # `index` is the overall pick number; `pick` is the pick within its round (snake order)
+        for c in sorted(data.get("choices", []), key=lambda c: c.get("index") or 0):
+            if wanted is not None and c.get("entry") not in wanted:
+                continue
+            who = league.by_entry(c.get("entry"))
+            items.append({"pick": c.get("index"), "round": c.get("round"),
+                          "pick_in_round": c.get("pick"), "manager": who["manager"],
+                          "team_name": who["team_name"] or c.get("entry_name"),
+                          "player": player(c.get("element")), "auto_pick": c.get("was_auto")})
+
+    return {"game": "draft", "league_id": lid, "league_name": league.name, "kind": kind,
+            "count": len(items[: max(1, limit)]), "total_matching": len(items),
+            "items": items[: max(1, limit)]}

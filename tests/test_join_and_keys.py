@@ -197,3 +197,113 @@ def test_admin_tools(env):
     assert "Ableton FC" in text_of(listing) and "c" * 64 not in text_of(listing)
     assert '"revoked": 1' in text_of(revoked)
     assert [r["entry_id"] for r in store.active()] == [101]
+
+
+# ── FPL Draft on /join ───────────────────────────────────────────────────────
+
+DRAFT_LEAGUE = 1000
+DRAFT_ROWS = [  # draft ids are their own id space: 101 here is NOT classic 101
+    {"entry": 101, "entry_name": "Draftowi Mistrzowie", "player_name": "Zosia Draft"},
+    {"entry": 2489, "entry_name": "Kurek XI", "player_name": "Hamit Kurek"},
+]
+
+
+async def _fake_draft_fetch(league_id, max_managers):
+    assert league_id == DRAFT_LEAGUE
+    return "Draft Mates", DRAFT_ROWS, True
+
+
+@pytest.fixture
+def env_draft(env, monkeypatch):
+    _app, store, notices, admin_key = env
+    app = create_app(roster=LeagueRoster(fetch_managers=_fake_fetch, league_ids=[LEAGUE]),
+                     draft_roster=LeagueRoster(fetch_managers=_fake_draft_fetch, league_ids=[DRAFT_LEAGUE]),
+                     notify=lambda text: _record(notices, text))
+    return app, store, notices, admin_key
+
+
+async def _record(notices, text):
+    notices.append(text)
+
+
+def _post_all(app, *forms, whoami=False):
+    """POST the forms in order; with ``whoami`` also call whoami with the last page's key."""
+    async def flow():
+        async with serving(app):
+            async with http_client(app) as h:
+                pages = [await h.post("/join", data=f) for f in forms]
+                await asyncio.sleep(0)
+                if whoami:
+                    pages.append(await _whoami(app, _key_in(pages[-1].text)))
+                return pages
+    return asyncio.run(flow())
+
+
+def test_form_shows_draft_field_only_when_draft_leagues_configured(env, env_draft):
+    async def get(app):
+        async with serving(app):
+            async with http_client(app) as h:
+                return (await h.get("/join")).text
+    assert "name='draft'" not in asyncio.run(get(env[0]))
+    page = asyncio.run(get(env_draft[0]))
+    assert "name='team'" in page and "name='draft'" in page and "oba pola" in page
+
+
+def test_draft_only_key(env_draft):
+    app, store, notices, _ = env_draft
+    empty, page, who = _post_all(app, {}, {"draft": "Kurek XI"}, whoami=True)
+    assert empty.status_code == 400 and _key_in(empty.text) is None
+    assert _key_in(page.text) and "FPL Draft" in page.text and "waiverów" in page.text
+    who = text_of(who).replace(" ", "")
+    assert '"client":"fpl-d2489"' in who and '"default_draft_entry_id":2489' in who
+    assert '"default_entry_id":null' in who
+    row = store.active()[0]
+    assert row["entry_id"] is None and (row["draft_entry_id"], row["draft_league_id"]) == (2489, DRAFT_LEAGUE)
+    assert "--draft" in notices[0]
+
+
+def test_both_games_one_key_and_separate_id_spaces(env_draft):
+    app, store, _, _ = env_draft
+    # 101 is "Łoś Team" in classic and "Draftowi Mistrzowie" in draft — each field searches its own game
+    page, who = _post_all(app, {"team": "101", "draft": "101"}, whoami=True)
+    assert "Łoś Team" in page.text and "Draftowi Mistrzowie" in page.text
+    who = text_of(who).replace(" ", "")
+    assert '"client":"fpl-101"' in who and '"default_entry_id":101' in who
+    assert '"default_draft_entry_id":101' in who and f'"default_draft_league_id":{DRAFT_LEAGUE}' in who
+    assert len(store.active()) == 1
+
+
+def test_ambiguous_draft_choice_keeps_classic_value(env_draft):
+    app, *_ = env_draft
+    (page,) = _post_all(app, {"team": "Marek Kowalski", "draft": "i"})  # 'i' matches both draft teams
+    assert "Którą drużynę" in page.text and "FPL Draft" in page.text
+    assert "name='team' value='Marek Kowalski'" in page.text and _key_in(page.text) is None
+
+
+def test_replacing_a_two_game_key_with_one_game_warns(env_draft):
+    app, store, _, _ = env_draft
+    first, confirm, replaced = _post_all(app, {"team": "102", "draft": "2489"}, {"team": "102"},
+                                         {"team": "102", "replace": "1"})
+    assert _key_in(first.text)
+    assert "ma już klucz" in confirm.text and "Kurek XI" in confirm.text
+    assert "nowy klucz jej nie" in confirm.text and _key_in(confirm.text) is None
+    assert _key_in(replaced.text)
+    (row,) = store.active()
+    assert row["entry_id"] == 102 and row["draft_entry_id"] is None
+
+
+def test_new_draft_key_revokes_key_sharing_the_draft_team(env_draft):
+    app, store, _, _ = env_draft
+    _post_all(app, {"team": "103", "draft": "2489"}, {"draft": "2489", "replace": "1"})
+    (row,) = store.active()
+    assert row["draft_entry_id"] == 2489 and row["entry_id"] is None
+
+
+def test_store_revokes_by_draft_entry(tmp_path):
+    store = JsonKeyStore(tmp_path / "keys.json")
+    store.issue(key_sha256="a" * 64, draft_entry_id=7, draft_league_id=1, manager_name="Z", servers=["fpl"])
+    store.issue(key_sha256="b" * 64, entry_id=7, league_id=2, manager_name="K", servers=["fpl"])
+    assert store.revoke_entry(7, "draft") == 1
+    assert [r["key_sha256"] for r in store.active()] == ["b" * 64]  # classic 7 untouched
+    with pytest.raises(ValueError):
+        store.issue(key_sha256="c" * 64, manager_name="?", servers=["fpl"])

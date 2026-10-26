@@ -37,23 +37,24 @@ def _ensure_schema() -> None:
         _schema_ready = True
 
 
-def get_cached_bootstrap(max_age_seconds: int) -> Optional[dict]:
+def get_cached_bootstrap(max_age_seconds: int, cache_id: str = _BOOTSTRAP_ID) -> Optional[dict]:
     """Return the cached bootstrap snapshot if present and younger than
-    ``max_age_seconds``; otherwise None (signalling the caller to refresh from the API)."""
+    ``max_age_seconds``; otherwise None (signalling the caller to refresh from the API).
+    ``cache_id`` keeps the classic and draft bootstraps apart in the same table."""
     _ensure_schema()
     with connection() as conn:
         row = conn.execute(
             "SELECT data, fetched_at FROM fpl_reference WHERE id = %s",
-            (_BOOTSTRAP_ID,),
+            (cache_id,),
         ).fetchone()
     if not row:
         return None
     data, fetched_at = row
     age = (datetime.now(timezone.utc) - fetched_at).total_seconds()
     if age > max_age_seconds:
-        logger.info("FPL bootstrap cache is stale (%.0fs old); refreshing from API", age)
+        logger.info("FPL %s cache is stale (%.0fs old); refreshing from API", cache_id, age)
         return None
-    logger.info("FPL bootstrap served from Postgres cache (%.0fs old)", age)
+    logger.info("FPL %s served from Postgres cache (%.0fs old)", cache_id, age)
     # JSONB comes back already decoded by psycopg; be tolerant just in case.
     if isinstance(data, (dict, list)):
         return data
@@ -61,7 +62,7 @@ def get_cached_bootstrap(max_age_seconds: int) -> Optional[dict]:
     return json.loads(data)
 
 
-def save_bootstrap(data: dict) -> None:
+def save_bootstrap(data: dict, cache_id: str = _BOOTSTRAP_ID) -> None:
     """Upsert the freshly fetched bootstrap snapshot, stamping the fetch time."""
     _ensure_schema()
     now = datetime.now(timezone.utc)
@@ -73,6 +74,6 @@ def save_bootstrap(data: dict) -> None:
             ON CONFLICT (id) DO UPDATE SET
                 data = EXCLUDED.data, fetched_at = EXCLUDED.fetched_at
             """,
-            (_BOOTSTRAP_ID, Json(data), now),
+            (cache_id, Json(data), now),
         )
-    logger.info("FPL bootstrap cached to Postgres (%d players)", len(data.get("elements", [])))
+    logger.info("FPL %s cached to Postgres (%d players)", cache_id, len(data.get("elements", [])))

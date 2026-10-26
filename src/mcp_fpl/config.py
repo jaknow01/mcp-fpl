@@ -24,8 +24,18 @@ def env_int(name: str, default: int, minimum: Optional[int] = None) -> int:
     return max(minimum, value) if minimum is not None else value
 
 
+def _id_list(name: str) -> list[int]:
+    raw = env_str(name) or ""
+    return [int(x) for x in raw.replace(" ", "").split(",") if x.isdigit()]
+
+
 def league_ids() -> list[int]:
     """``FPL_LEAGUES``: the classic leagues this server collects history for, keeps warm,
     and whose managers may get a key on /join."""
-    raw = env_str("FPL_LEAGUES") or ""
-    return [int(x) for x in raw.replace(" ", "").split(",") if x.isdigit()]
+    return _id_list("FPL_LEAGUES")
+
+
+def draft_league_ids() -> list[int]:
+    """``FPL_DRAFT_LEAGUES``: the FPL Draft leagues whose managers may get a key on /join
+    (Draft ids are a separate id space from classic ones)."""
+    return _id_list("FPL_DRAFT_LEAGUES")

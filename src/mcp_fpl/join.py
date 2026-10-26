@@ -1,18 +1,21 @@
 """Self-service key page: ``GET/POST /join`` (alias ``/mcp/join``) (see docs/MCP.md).
 
-A manager of one of the configured FPL leagues types their entry id, team name or own name,
-and gets an API key for this server — already linked to their entry and league, with
-ready-to-paste setup for several MCP clients (Claude, ChatGPT, OpenAI API, Cursor, VS Code,
+A manager of one of the configured leagues types their team — in classic FPL, in FPL Draft,
+or both (two separate fields: the games have separate ids and often different team names) —
+as an entry id, team name or own name, and gets one API key for this server, linked to those
+teams and their leagues, with ready-to-paste setup for several MCP clients (Claude, ChatGPT, OpenAI API, Cursor, VS Code,
 Gemini CLI, self-hosted assistants, anything else that speaks MCP over HTTP), shown as tabs with Claude first.
 
 There is deliberately NO proof of ownership: league tables are public, so this is a
-convenience gate ("only people from my league"), not authentication. What keeps it sane:
-one active key per entry (a new one revokes the old — that is also how a lost key is
-replaced), a confirmation step before replacing a key, a per-IP hourly limit, and a
-notification to the owner for every key issued (``JOIN_NOTIFY_WEBHOOK_URL``; revoke with the
-admin tool ``revoke_issued_key`` or ``mcp-fpl keys revoke <entry>``).
+convenience gate ("only people from my leagues"), not authentication. What keeps it sane:
+one active key per person (a new key revokes every key sharing its classic or Draft team —
+that is also how a lost key is replaced), a confirmation step before replacing a key, a
+per-IP hourly limit, and a notification to the owner for every key issued
+(``JOIN_NOTIFY_WEBHOOK_URL``; revoke with the admin tool ``revoke_issued_key`` or
+``mcp-fpl keys revoke <entry> [--draft]``).
 
-Leagues: ``FPL_LEAGUES`` (comma list). Switch:
+Leagues: ``FPL_LEAGUES`` (classic) and ``FPL_DRAFT_LEAGUES`` (Draft), comma lists; a game
+with no leagues configured has no field on the page. Switch:
 ``MCP_JOIN_ENABLED`` (default on). Public base URL for the instructions:
 ``MCP_PUBLIC_URL`` or else derived from the proxy headers.
 """
@@ -34,7 +37,8 @@ from starlette.routing import Route
 import httpx2
 from jarvis_mcp_kit import ClientRegistry, hash_key, new_key
 
-from mcp_fpl.config import env_flag, env_int, env_str, league_ids
+from mcp_fpl.config import draft_league_ids, env_flag, env_int, env_str, league_ids
+from mcp_fpl.draft_api import list_draft_league_managers
 from mcp_fpl.fpl_api import list_league_managers
 
 logger = logging.getLogger(__name__)
@@ -49,6 +53,10 @@ def join_enabled() -> bool:
 
 def join_league_ids() -> list[int]:
     return league_ids()
+
+
+def join_draft_league_ids() -> list[int]:
+    return draft_league_ids()
 
 
 # ── league roster ──────────────────────────────────────────────────────────────
@@ -67,9 +75,11 @@ class LeagueRoster:
     minute) when a lookup misses, so someone who just joined the league isn't stuck."""
 
     def __init__(self, fetch_managers: Callable[..., Awaitable] = list_league_managers,
-                 league_ids: Optional[list[int]] = None):
+                 league_ids: Optional[list[int]] = None,
+                 env_league_ids: Callable[[], list[int]] = join_league_ids):
         self._fetch = fetch_managers
-        self._league_ids = league_ids  # None → join_league_ids() from the env, read per load
+        self._league_ids = league_ids  # None → env_league_ids() from the env, read per load
+        self._env_league_ids = env_league_ids
         self._members: dict[int, dict] = {}
         self._loaded_at: Optional[float] = None
         self._lock = asyncio.Lock()
@@ -87,7 +97,7 @@ class LeagueRoster:
 
     async def _load(self) -> None:
         members: dict[int, dict] = {}
-        for league_id in (self._league_ids if self._league_ids is not None else join_league_ids()):
+        for league_id in self.league_ids():
             try:
                 league_name, rows, _complete = await self._fetch(league_id, _MAX_LEAGUE_MANAGERS)
             except Exception as e:
@@ -105,6 +115,21 @@ class LeagueRoster:
         if members or self._loaded_at is None:
             self._members = members
         self._loaded_at = time.monotonic()
+
+    def league_ids(self) -> list[int]:
+        return self._league_ids if self._league_ids is not None else self._env_league_ids()
+
+    async def find(self, query: str) -> list[dict]:
+        """Members matching ``query``; on a miss the roster is refreshed (at most once a
+        minute) and searched again — maybe they just joined the league."""
+        found = match_members(query, await self.members())
+        if not found:
+            found = match_members(query, await self.members(refresh_if_older_than=60))
+        return found
+
+
+def make_draft_roster() -> LeagueRoster:
+    return LeagueRoster(fetch_managers=list_draft_league_managers, env_league_ids=join_draft_league_ids)
 
 
 def match_members(query: str, members: dict[int, dict]) -> list[dict]:
@@ -204,19 +229,42 @@ def _page(body: str, status: int = 200) -> HTMLResponse:
     return HTMLResponse(doc, status_code=status, headers=_HEADERS)
 
 
-def _form(prefill: str = "", note: str = "") -> str:
+GAMES = {"classic": "Klasyczne FPL", "draft": "FPL Draft"}
+_FIELDS = {"classic": "team", "draft": "draft"}
+
+
+def _hidden(name: str, value) -> str:
+    return f"<input type='hidden' name='{name}' value='{_e(str(value))}'>" if value not in (None, "") else ""
+
+
+def _form(games: list[str], prefill: Optional[dict] = None, note: str = "") -> str:
+    prefill = prefill or {}
+    fields = []
+    if "classic" in games:
+        fields.append(
+            "<label for='team'><b>Drużyna w klasycznym FPL</b></label>"
+            f"<input id='team' name='team' type='text' value='{_e(prefill.get('classic', ''))}' "
+            "autocomplete='off' placeholder='ID drużyny, nazwa drużyny albo imię i nazwisko'>"
+            "<p class='muted'>ID to liczba w adresie Twojej drużyny na stronie FPL, np. "
+            "…/entry/<b>1234567</b>/event/7</p>")
+    if "draft" in games:
+        fields.append(
+            "<label for='draft'><b>Drużyna w FPL Draft</b></label>"
+            f"<input id='draft' name='draft' type='text' value='{_e(prefill.get('draft', ''))}' "
+            "autocomplete='off' placeholder='ID drużyny, nazwa drużyny albo imię i nazwisko'>"
+            "<p class='muted'>Draft to osobna gra z osobnym ID — to liczba po /entry/ w adresie "
+            "Twojej drużyny na stronie draftu.</p>")
+    both = ("<p class='muted'>Wypełnij jedno albo oba pola. Jeśli grasz w obie gry, jeden klucz "
+            "obejmie obie drużyny.</p>" if len(games) > 1 else "")
     return (
         "<div class='card'>"
         "<p>Podłącz narzędzia FPL (terminarz z FDR, Twoja drużyna, wyniki na żywo, tabela "
-        "i własność zawodników w naszej lidze) do swojego agenta AI — działa z każdym agentem, "
-        "który obsługuje MCP (Model Context Protocol), w przeglądarce, na telefonie albo w edytorze.</p>"
+        "i własność zawodników w lidze; w drafcie także wolni zawodnicy, waivery i wymiany) "
+        "do swojego agenta AI — działa z każdym agentem, który obsługuje MCP (Model Context "
+        "Protocol), w przeglądarce, na telefonie albo w edytorze.</p>"
         f"{note}"
         "<form method='post' action=''>"
-        "<label for='team'><b>Twoja drużyna</b></label>"
-        f"<input id='team' name='team' type='text' value='{_e(prefill)}' autocomplete='off' required "
-        "placeholder='ID drużyny, nazwa drużyny albo imię i nazwisko'>"
-        "<p class='muted'>ID to liczba w adresie Twojej drużyny na stronie FPL, np. "
-        "…/entry/<b>1234567</b>/event/7</p>"
+        f"{''.join(fields)}{both}"
         "<button type='submit'>Wygeneruj klucz</button></form></div>"
     )
 
@@ -225,13 +273,20 @@ def _member_label(m: dict) -> str:
     return f"{_e(m['team'])} — {_e(m['manager'])} (ID {m['entry']})"
 
 
+def _team_line(game: str, m: dict) -> str:
+    return f"<p><b>{GAMES[game]}:</b> {_member_label(m)} · liga {_e(m['league'])}</p>"
+
+
 _MAX_CHOICES = 12
 
 
-def _choices(members: list[dict]) -> str:
+def _choices(game: str, members: list[dict], other: dict) -> str:
+    """Pick one of several matching teams for ``game``; the other field's value rides along."""
+    field = _FIELDS[game]
+    keep = "".join(_hidden(_FIELDS[g], v) for g, v in other.items())
     buttons = "".join(
         "<form class='choice' method='post' action=''>"
-        f"<input type='hidden' name='team' value='{m['entry']}'>"
+        f"<input type='hidden' name='{field}' value='{m['entry']}'>{keep}"
         f"<button class='secondary' type='submit'>{_member_label(m)}</button></form>"
         for m in members[:_MAX_CHOICES]
     )
@@ -240,18 +295,39 @@ def _choices(members: list[dict]) -> str:
         more = (f"<p class='muted'>…i {len(members) - _MAX_CHOICES} więcej. Wpisz dokładniejszą "
                 "nazwę albo ID drużyny.</p><form method='get' action=''>"
                 "<button class='secondary' type='submit'>Szukaj ponownie</button></form>")
-    return f"<div class='card'><h2>Którą drużynę masz na myśli?</h2>{buttons}{more}</div>"
+    return (f"<div class='card'><h2>Którą drużynę masz na myśli?</h2>"
+            f"<p class='muted'>{GAMES[game]}</p>{buttons}{more}</div>")
 
 
-def _confirm_replace(m: dict) -> str:
+def _old_key_line(row: dict) -> str:
+    parts = []
+    if row.get("entry_id") is not None:
+        parts.append(f"{GAMES['classic']}: {_e(row.get('team_name') or '?')} (ID {row['entry_id']})")
+    if row.get("draft_entry_id") is not None:
+        parts.append(f"{GAMES['draft']}: {_e(row.get('draft_team_name') or '?')} (ID {row['draft_entry_id']})")
+    return "<li>" + " · ".join(parts) + "</li>"
+
+
+def _confirm_replace(chosen: dict, old_rows: list[dict]) -> str:
+    """``chosen``: game → member for the new key; ``old_rows``: the active keys it replaces."""
+    lost = []
+    if any(r.get("draft_entry_id") is not None for r in old_rows) and "draft" not in chosen:
+        lost.append("drużynę z FPL Draft")
+    if any(r.get("entry_id") is not None for r in old_rows) and "classic" not in chosen:
+        lost.append("drużynę z klasycznego FPL")
+    warn = (f"<p class='warn'>Poprzedni klucz obejmował też {' i '.join(lost)} — nowy klucz jej nie "
+            "obejmie. Jeśli chcesz ją zachować, wróć i wypełnij oba pola.</p>" if lost else "")
+    keep = "".join(_hidden(_FIELDS[g], m["entry"]) for g, m in chosen.items())
     return (
         "<div class='card'>"
-        f"<h2 class='warn'>Ta drużyna ma już klucz</h2><p>{_member_label(m)}</p>"
+        "<h2 class='warn'>Ta drużyna ma już klucz</h2>"
+        f"{''.join(_team_line(g, m) for g, m in chosen.items())}"
+        f"<p>Obecny klucz:</p><ul>{''.join(_old_key_line(r) for r in old_rows)}</ul>"
         "<p>Nowy klucz <b>unieważni poprzedni</b> — wszystkie podłączenia na starym kluczu "
         "przestaną działać. Rób to, jeśli zgubiłeś klucz albo chcesz go zmienić.</p>"
+        f"{warn}"
         "<form method='post' action=''>"
-        f"<input type='hidden' name='team' value='{m['entry']}'>"
-        "<input type='hidden' name='replace' value='1'>"
+        f"{keep}<input type='hidden' name='replace' value='1'>"
         "<button type='submit'>Tak, wygeneruj nowy klucz</button></form>"
         "<form method='get' action=''><button class='secondary' type='submit'>Anuluj</button></form>"
         "</div>"
@@ -378,19 +454,27 @@ def _provider_tabs(key: str, base: str, box: _Boxes) -> str:
             f"<div class='tabs' role='tablist'>{buttons}</div>{bodies}</div>")
 
 
-def _issued(m: dict, key: str, base: str) -> str:
+def _issued(chosen: dict, key: str, base: str) -> str:
     box = _Boxes()
+    examples = ["„Jak poszło mojej drużynie w tej kolejce?”", "„Jaki terminarz ma Arsenal na 5 kolejek?”"]
+    if "classic" in chosen:
+        examples.insert(1, "„Kto w naszej lidze ma Haalanda?”")
+    if "draft" in chosen:
+        examples += ["„Kogo warto wziąć z waiverów na obronę?”", "„Z kim gram w tej kolejce w drafcie?”"]
+    both = ("<p class='muted'>Masz obie gry pod jednym kluczem — jeśli z pytania nie wynika, "
+            "o którą chodzi, agent dopyta.</p>" if len(chosen) > 1 else "")
     return (
         "<div class='card'>"
-        f"<h2 class='ok'>Gotowe ✓</h2><p>{_member_label(m)} · liga {_e(m['league'])}</p>"
+        "<h2 class='ok'>Gotowe ✓</h2>"
+        f"{''.join(_team_line(g, m) for g, m in chosen.items())}"
         "<p class='warn'><b>Zapisz to teraz — klucz pokazujemy tylko raz.</b> "
         "Traktuj go jak hasło i nie wklejaj nigdzie publicznie.</p>"
         f"<p><b>Twój klucz</b></p>{box(key)}</div>"
         f"{_provider_tabs(key, base, box)}"
         "<div class='card'><h2>Spróbuj</h2>"
-        "<p>„Jak poszło mojej drużynie w tej kolejce?”, „Kto w naszej lidze ma Haalanda?”, "
-        "„Jaki terminarz ma Arsenal na 5 kolejek?”</p>"
-        "<p class='muted'>Domyślnie „moja drużyna” to drużyna z tego klucza, a „liga” to nasza liga.</p></div>"
+        f"<p>{', '.join(examples)}</p>"
+        "<p class='muted'>Domyślnie „moja drużyna” i „liga” to drużyny i ligi z tego klucza.</p>"
+        f"{both}</div>"
     )
 
 
@@ -428,60 +512,90 @@ class _HourlyLimiter:
 
 class JoinService:
     def __init__(self, registry: ClientRegistry, store: Any, roster: Optional[LeagueRoster] = None,
-                 notify: Callable[[str], Awaitable[None]] = notify_owner):
+                 notify: Callable[[str], Awaitable[None]] = notify_owner,
+                 draft_roster: Optional[LeagueRoster] = None):
         self.registry = registry
         self.store = store
-        self.roster = roster or LeagueRoster()
+        self.rosters = {"classic": roster or LeagueRoster(), "draft": draft_roster or make_draft_roster()}
         self.notify = notify
         self.limiter = _HourlyLimiter()
 
+    def games(self) -> list[str]:
+        """The games that have leagues configured (and so a field on the page)."""
+        return [g for g, r in self.rosters.items() if r.league_ids()]
+
     async def endpoint(self, request: Request) -> HTMLResponse:
-        if not join_enabled() or not join_league_ids():
+        games = self.games()
+        if not join_enabled() or not games:
             return _page("<div class='card'><p>Samodzielne pobieranie kluczy jest wyłączone.</p></div>", 503)
         if request.method != "POST":
-            return _page(_form())
+            return _page(_form(games))
         if not self.limiter.allow(_client_ip(request)):
-            return _page(_form(note="<p class='warn'>Za dużo prób — spróbuj ponownie za godzinę.</p>"), 429)
+            return _page(_form(games, note="<p class='warn'>Za dużo prób — spróbuj ponownie za godzinę.</p>"), 429)
         form = await request.form()
-        query = str(form.get("team", ""))[:100]
+        queries = {g: str(form.get(_FIELDS[g], "")).strip()[:100] for g in games}
+        queries = {g: q for g, q in queries.items() if q}
         replace = form.get("replace") == "1"
+        if not queries:
+            note = "<p class='warn'>Podaj swoją drużynę — wystarczy jedno pole.</p>"
+            return _page(_form(games, note=note), 400)
 
-        members = await self.roster.members()
-        found = match_members(query, members)
-        if not found:  # maybe they just joined the league: refresh (at most once a minute) and retry
-            found = match_members(query, await self.roster.members(refresh_if_older_than=60))
-        if not found:
-            note = ("<p class='warn'>Nie znalazłem takiej drużyny w naszej lidze. Wpisz ID drużyny "
-                    "(z adresu strony FPL) albo dokładną nazwę.</p>")
-            return _page(_form(query, note), 404)
-        if len(found) > 1:
-            return _page(_choices(found))
-        member = found[0]
+        chosen: dict[str, dict] = {}
+        for game, query in queries.items():
+            found = await self.rosters[game].find(query)
+            if not found:
+                note = (f"<p class='warn'>Nie znalazłem takiej drużyny ({GAMES[game]}) w naszych ligach. "
+                        "Wpisz ID drużyny (z adresu strony) albo dokładną nazwę.</p>")
+                return _page(_form(games, queries, note), 404)
+            if len(found) > 1:
+                return _page(_choices(game, found, {g: q for g, q in queries.items() if g != game}))
+            chosen[game] = found[0]
 
+        classic, draft = chosen.get("classic"), chosen.get("draft")
         active = await asyncio.to_thread(self.store.active)
-        if any(int(r.get("entry_id", -1)) == member["entry"] for r in active) and not replace:
-            return _page(_confirm_replace(member))
+        old_rows = [r for r in active
+                    if (classic and r.get("entry_id") is not None and int(r["entry_id"]) == classic["entry"])
+                    or (draft and r.get("draft_entry_id") is not None and int(r["draft_entry_id"]) == draft["entry"])]
+        if old_rows and not replace:
+            return _page(_confirm_replace(chosen, old_rows))
 
         key = new_key()
+        manager = (classic or draft)["manager"]
         replaced = await asyncio.to_thread(
-            lambda: self.store.issue(key_sha256=hash_key(key), entry_id=member["entry"],
-                                     league_id=member["league_id"], manager_name=member["manager"],
-                                     team_name=member["team"], servers=["fpl"]))
+            lambda: self.store.issue(
+                key_sha256=hash_key(key), servers=["fpl"], manager_name=manager,
+                entry_id=classic["entry"] if classic else None,
+                league_id=classic["league_id"] if classic else None,
+                team_name=classic["team"] if classic else None,
+                draft_entry_id=draft["entry"] if draft else None,
+                draft_league_id=draft["league_id"] if draft else None,
+                draft_team_name=draft["team"] if draft else None))
         self.registry.invalidate()
-        logger.info("MCP join: issued key for entry %s (replaced %d)", member["entry"], replaced)
-        text = (f"🔑 Nowy klucz MCP (FPL): {member['manager']} — {member['team']} (ID {member['entry']}), "
-                f"liga {member['league']}." + (" Zastąpił poprzedni klucz." if replaced else "")
-                + f"\nOdwołanie: /mcp revoke {member['entry']}")
-        task = asyncio.create_task(self._notify_quietly(text))
+        logger.info("MCP join: issued key for classic=%s draft=%s (replaced %d)",
+                    classic and classic["entry"], draft and draft["entry"], replaced)
+        task = asyncio.create_task(self._notify_quietly(_notice(chosen, replaced)))
         _background.add(task)
         task.add_done_callback(_background.discard)
-        return _page(_issued(member, key, _public_base(request)))
+        return _page(_issued(chosen, key, _public_base(request)))
 
     async def _notify_quietly(self, text: str) -> None:
         try:
             await self.notify(text)
         except Exception:
             logger.warning("MCP join: owner notification failed", exc_info=True)
+
+
+def _notice(chosen: dict, replaced: int) -> str:
+    lines = [f"🔑 Nowy klucz MCP (FPL): {(chosen.get('classic') or chosen.get('draft'))['manager']}"]
+    revoke = []
+    for game, m in chosen.items():
+        lines.append(f"{GAMES[game]}: {m['team']} (ID {m['entry']}), liga {m['league']}.")
+        revoke.append(f"/mcp revoke {m['entry']}" if game == "classic"
+                      else f"mcp-fpl keys revoke {m['entry']} --draft")
+    if replaced:
+        lines.append("Zastąpił poprzedni klucz.")
+    lines.append("Odwołanie: " + " albo ".join(revoke))
+    return "\n".join(lines)
 
 
 def build_join_routes(registry: ClientRegistry, store: Any, **kwargs) -> list[Route]:

@@ -41,7 +41,7 @@ SCHEMA_STATEMENTS = [
         PRIMARY KEY (league_id, snapshot_date)
     )
     """,
-    # self-service API keys from /mcp/join (sha256 only; one active per entry)
+    # self-service API keys from /join (sha256 only; one active per classic/draft team)
     """
     CREATE TABLE IF NOT EXISTS mcp_api_keys (
         key_sha256   TEXT PRIMARY KEY,
@@ -57,6 +57,15 @@ SCHEMA_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS mcp_api_keys_active_by_entry
         ON mcp_api_keys (entry_id) WHERE revoked_at IS NULL
+    """,
+    # FPL Draft: a key may link a classic team, a draft team, or both
+    "ALTER TABLE mcp_api_keys ALTER COLUMN entry_id DROP NOT NULL",
+    "ALTER TABLE mcp_api_keys ADD COLUMN IF NOT EXISTS draft_entry_id BIGINT",
+    "ALTER TABLE mcp_api_keys ADD COLUMN IF NOT EXISTS draft_league_id BIGINT",
+    "ALTER TABLE mcp_api_keys ADD COLUMN IF NOT EXISTS draft_team_name TEXT",
+    """
+    CREATE INDEX IF NOT EXISTS mcp_api_keys_active_by_draft_entry
+        ON mcp_api_keys (draft_entry_id) WHERE revoked_at IS NULL
     """,
 ]
 

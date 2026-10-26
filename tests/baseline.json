@@ -43,6 +43,34 @@
             "default": 25,
             "title": "Limit",
             "type": "integer"
+          },
+          "game": {
+            "anyOf": [
+              {
+                "enum": [
+                  "classic",
+                  "draft"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Game"
+          },
+          "gameweek": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Gameweek"
           }
         },
         "type": "object"
@@ -81,6 +109,22 @@
             ],
             "default": null,
             "title": "Entry Id"
+          },
+          "game": {
+            "anyOf": [
+              {
+                "enum": [
+                  "classic",
+                  "draft"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Game"
           }
         },
         "type": "object"
@@ -213,6 +257,22 @@
             ],
             "default": null,
             "title": "Entry Id"
+          },
+          "game": {
+            "anyOf": [
+              {
+                "enum": [
+                  "classic",
+                  "draft"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Game"
           }
         },
         "type": "object"
@@ -246,6 +306,22 @@
             ],
             "default": null,
             "title": "Entry Id"
+          },
+          "game": {
+            "anyOf": [
+              {
+                "enum": [
+                  "classic",
+                  "draft"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Game"
           }
         },
         "type": "object"
@@ -296,6 +372,22 @@
             "default": 50,
             "title": "Max Managers",
             "type": "integer"
+          },
+          "game": {
+            "anyOf": [
+              {
+                "enum": [
+                  "classic",
+                  "draft"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Game"
           }
         },
         "required": [
