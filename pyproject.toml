@@ -1,6 +1,6 @@
 [project]
 name = "mcp-fpl"
-version = "0.4.0"
+version = "0.4.1"
 description = "Fantasy Premier League tools (fixtures, live, squads, mini-leagues, history) and a self-service key page, as an MCP server."
 readme = "README.md"
 license = "MIT"

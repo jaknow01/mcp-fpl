@@ -40,13 +40,17 @@ Part of the Jarvis tool servers; built on
 ## Self-service keys — `/join`
 
 Members of the leagues in `FPL_LEAGUES` (classic) and `FPL_DRAFT_LEAGUES` (Draft) open
-`https://<host>/join` and type their team — classic, Draft or both, in two separate fields —
-as an entry id, team name or name. They get one key linked to those teams, with setup for
-Claude, ChatGPT, the OpenAI API, Cursor, VS Code, Gemini CLI and self-hosted assistants.
-No proof of ownership (league tables are public) — instead: one active key per person (a new
-one revokes every key sharing its classic or Draft team, after a confirmation), 10 attempts per
-IP per hour, and a notification for every key to `JOIN_NOTIFY_WEBHOOK_URL`. Revoke with the
-admin tool or `mcp-fpl keys revoke <entry_id> [--draft]`; list with `mcp-fpl keys list`.
+`https://<host>/join` and enter their team — classic, Draft or both, in two separate fields —
+as the team's id or its exact name (case-insensitive; no partial matches, no candidate lists).
+They get one key linked to those teams, with setup for Claude, ChatGPT, the OpenAI API, Cursor,
+VS Code, Gemini CLI and self-hosted assistants.
+
+One key per team: a team that already has a key gets none, and the page answers that with the
+same message as an unknown team, so it never reveals which teams are taken. A lost key is
+replaced after the admin revokes it (admin tool `revoke_issued_key` or
+`mcp-fpl keys revoke <entry_id> [--draft]`; list with `mcp-fpl keys list`). No proof of
+ownership (league tables are public) — instead: 10 attempts per IP per hour and a notification
+for every key to `JOIN_NOTIFY_WEBHOOK_URL`.
 
 ## Storage and jobs
 

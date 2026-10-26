@@ -2,17 +2,18 @@
 
 A manager of one of the configured leagues types their team — in classic FPL, in FPL Draft,
 or both (two separate fields: the games have separate ids and often different team names) —
-as an entry id, team name or own name, and gets one API key for this server, linked to those
-teams and their leagues, with ready-to-paste setup for several MCP clients (Claude, ChatGPT, OpenAI API, Cursor, VS Code,
+as the team's id or its exact name (case-insensitive), and gets one API key for this server,
+linked to those teams and their leagues, with ready-to-paste setup for several MCP clients (Claude, ChatGPT, OpenAI API, Cursor, VS Code,
 Gemini CLI, self-hosted assistants, anything else that speaks MCP over HTTP), shown as tabs with Claude first.
 
 There is deliberately NO proof of ownership: league tables are public, so this is a
 convenience gate ("only people from my leagues"), not authentication. What keeps it sane:
-one active key per person (a new key revokes every key sharing its classic or Draft team —
-that is also how a lost key is replaced), a confirmation step before replacing a key, a
-per-IP hourly limit, and a notification to the owner for every key issued
-(``JOIN_NOTIFY_WEBHOOK_URL``; revoke with the admin tool ``revoke_issued_key`` or
-``mcp-fpl keys revoke <entry> [--draft]``).
+only an exact team id or name gets a key (no partial matches, no lists of candidates); a
+team that already has a key gets none — the page answers both cases with the same message,
+so it never reveals which teams are taken — and a lost key is replaced only after the admin
+revokes it (admin tool ``revoke_issued_key`` or ``mcp-fpl keys revoke <entry> [--draft]``);
+plus a per-IP hourly limit and a notification to the owner for every key issued
+(``JOIN_NOTIFY_WEBHOOK_URL``).
 
 Leagues: ``FPL_LEAGUES`` (classic) and ``FPL_DRAFT_LEAGUES`` (Draft), comma lists; a game
 with no leagues configured has no field on the page. Switch:
@@ -26,7 +27,6 @@ import json
 import logging
 import os
 import time
-import unicodedata
 from collections import deque
 from typing import Any, Awaitable, Callable, Optional
 
@@ -61,12 +61,9 @@ def join_draft_league_ids() -> list[int]:
 
 # ── league roster ──────────────────────────────────────────────────────────────
 
-def _norm(text: str) -> str:
-    """Case-, accent- and spacing-insensitive form for name matching ('Łukasz' ~ 'lukasz')."""
-    text = (text or "").replace("ł", "l").replace("Ł", "L")
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(c for c in text if not unicodedata.combining(c))
-    return " ".join(text.casefold().split())
+def _name_key(text: str) -> str:
+    """Team names match case-insensitively, ignoring surrounding/repeated spaces only."""
+    return " ".join((text or "").casefold().split())
 
 
 class LeagueRoster:
@@ -133,18 +130,16 @@ def make_draft_roster() -> LeagueRoster:
 
 
 def match_members(query: str, members: dict[int, dict]) -> list[dict]:
-    """Entry id → that entry; else exact team/manager name; else substring matches."""
+    """Exact matches only: the team's entry id, or its full team name (case-insensitive).
+    More than one result means several teams share that exact name."""
     q = (query or "").strip()
     if not q:
         return []
     if q.isdigit():
         hit = members.get(int(q))
         return [hit] if hit else []
-    nq = _norm(q)
-    exact = [m for m in members.values() if nq in (_norm(m["team"]), _norm(m["manager"]))]
-    if exact:
-        return exact
-    return [m for m in members.values() if nq in _norm(m["team"]) or nq in _norm(m["manager"])]
+    key = _name_key(q)
+    return [m for m in members.values() if _name_key(m["team"]) == key]
 
 
 # ── owner notification ─────────────────────────────────────────────────────────
@@ -233,10 +228,6 @@ GAMES = {"classic": "Klasyczne FPL", "draft": "FPL Draft"}
 _FIELDS = {"classic": "team", "draft": "draft"}
 
 
-def _hidden(name: str, value) -> str:
-    return f"<input type='hidden' name='{name}' value='{_e(str(value))}'>" if value not in (None, "") else ""
-
-
 def _form(games: list[str], prefill: Optional[dict] = None, note: str = "") -> str:
     prefill = prefill or {}
     fields = []
@@ -244,16 +235,15 @@ def _form(games: list[str], prefill: Optional[dict] = None, note: str = "") -> s
         fields.append(
             "<label for='team'><b>Drużyna w klasycznym FPL</b></label>"
             f"<input id='team' name='team' type='text' value='{_e(prefill.get('classic', ''))}' "
-            "autocomplete='off' placeholder='ID drużyny, nazwa drużyny albo imię i nazwisko'>"
+            "autocomplete='off' placeholder='ID drużyny albo jej dokładna nazwa'>"
             "<p class='muted'>ID to liczba w adresie Twojej drużyny na stronie FPL, np. "
             "…/entry/<b>1234567</b>/event/7</p>")
     if "draft" in games:
         fields.append(
             "<label for='draft'><b>Drużyna w FPL Draft</b></label>"
             f"<input id='draft' name='draft' type='text' value='{_e(prefill.get('draft', ''))}' "
-            "autocomplete='off' placeholder='ID drużyny, nazwa drużyny albo imię i nazwisko'>"
-            "<p class='muted'>Draft to osobna gra z osobnym ID — to liczba po /entry/ w adresie "
-            "Twojej drużyny na stronie draftu.</p>")
+            "autocomplete='off' placeholder='ID drużyny albo jej dokładna nazwa'>"
+            "<p class='muted'>Draft to osobna gra z osobnym ID i nazwą drużyny.</p>")
     both = ("<p class='muted'>Wypełnij jedno albo oba pola. Jeśli grasz w obie gry, jeden klucz "
             "obejmie obie drużyny.</p>" if len(games) > 1 else "")
     return (
@@ -265,7 +255,9 @@ def _form(games: list[str], prefill: Optional[dict] = None, note: str = "") -> s
         f"{note}"
         "<form method='post' action=''>"
         f"{''.join(fields)}{both}"
-        "<button type='submit'>Wygeneruj klucz</button></form></div>"
+        "<button type='submit'>Wygeneruj klucz</button></form>"
+        "<p class='muted'>Każda drużyna może mieć tylko jeden klucz. Zgubiłeś swój? Poproś "
+        "administratora ligi o jego unieważnienie i wygeneruj nowy.</p></div>"
     )
 
 
@@ -275,63 +267,6 @@ def _member_label(m: dict) -> str:
 
 def _team_line(game: str, m: dict) -> str:
     return f"<p><b>{GAMES[game]}:</b> {_member_label(m)} · liga {_e(m['league'])}</p>"
-
-
-_MAX_CHOICES = 12
-
-
-def _choices(game: str, members: list[dict], other: dict) -> str:
-    """Pick one of several matching teams for ``game``; the other field's value rides along."""
-    field = _FIELDS[game]
-    keep = "".join(_hidden(_FIELDS[g], v) for g, v in other.items())
-    buttons = "".join(
-        "<form class='choice' method='post' action=''>"
-        f"<input type='hidden' name='{field}' value='{m['entry']}'>{keep}"
-        f"<button class='secondary' type='submit'>{_member_label(m)}</button></form>"
-        for m in members[:_MAX_CHOICES]
-    )
-    more = ""
-    if len(members) > _MAX_CHOICES:
-        more = (f"<p class='muted'>…i {len(members) - _MAX_CHOICES} więcej. Wpisz dokładniejszą "
-                "nazwę albo ID drużyny.</p><form method='get' action=''>"
-                "<button class='secondary' type='submit'>Szukaj ponownie</button></form>")
-    return (f"<div class='card'><h2>Którą drużynę masz na myśli?</h2>"
-            f"<p class='muted'>{GAMES[game]}</p>{buttons}{more}</div>")
-
-
-def _old_key_line(row: dict) -> str:
-    parts = []
-    if row.get("entry_id") is not None:
-        parts.append(f"{GAMES['classic']}: {_e(row.get('team_name') or '?')} (ID {row['entry_id']})")
-    if row.get("draft_entry_id") is not None:
-        parts.append(f"{GAMES['draft']}: {_e(row.get('draft_team_name') or '?')} (ID {row['draft_entry_id']})")
-    return "<li>" + " · ".join(parts) + "</li>"
-
-
-def _confirm_replace(chosen: dict, old_rows: list[dict]) -> str:
-    """``chosen``: game → member for the new key; ``old_rows``: the active keys it replaces."""
-    lost = []
-    if any(r.get("draft_entry_id") is not None for r in old_rows) and "draft" not in chosen:
-        lost.append("drużynę z FPL Draft")
-    if any(r.get("entry_id") is not None for r in old_rows) and "classic" not in chosen:
-        lost.append("drużynę z klasycznego FPL")
-    warn = (f"<p class='warn'>Poprzedni klucz obejmował też {' i '.join(lost)} — nowy klucz jej nie "
-            "obejmie. Jeśli chcesz ją zachować, wróć i wypełnij oba pola.</p>" if lost else "")
-    keep = "".join(_hidden(_FIELDS[g], m["entry"]) for g, m in chosen.items())
-    return (
-        "<div class='card'>"
-        "<h2 class='warn'>Ta drużyna ma już klucz</h2>"
-        f"{''.join(_team_line(g, m) for g, m in chosen.items())}"
-        f"<p>Obecny klucz:</p><ul>{''.join(_old_key_line(r) for r in old_rows)}</ul>"
-        "<p>Nowy klucz <b>unieważni poprzedni</b> — wszystkie podłączenia na starym kluczu "
-        "przestaną działać. Rób to, jeśli zgubiłeś klucz albo chcesz go zmienić.</p>"
-        f"{warn}"
-        "<form method='post' action=''>"
-        f"{keep}<input type='hidden' name='replace' value='1'>"
-        "<button type='submit'>Tak, wygeneruj nowy klucz</button></form>"
-        "<form method='get' action=''><button class='secondary' type='submit'>Anuluj</button></form>"
-        "</div>"
-    )
 
 
 class _Boxes:
@@ -535,35 +470,33 @@ class JoinService:
         form = await request.form()
         queries = {g: str(form.get(_FIELDS[g], "")).strip()[:100] for g in games}
         queries = {g: q for g, q in queries.items() if q}
-        replace = form.get("replace") == "1"
         if not queries:
             note = "<p class='warn'>Podaj swoją drużynę — wystarczy jedno pole.</p>"
             return _page(_form(games, note=note), 400)
 
+        active = await asyncio.to_thread(self.store.active)
+        taken = {"classic": {int(r["entry_id"]) for r in active if r.get("entry_id") is not None},
+                 "draft": {int(r["draft_entry_id"]) for r in active if r.get("draft_entry_id") is not None}}
         chosen: dict[str, dict] = {}
         for game, query in queries.items():
             found = await self.rosters[game].find(query)
-            if not found:
-                note = (f"<p class='warn'>Nie znalazłem takiej drużyny ({GAMES[game]}) w naszych ligach. "
-                        "Wpisz ID drużyny (z adresu strony) albo dokładną nazwę.</p>")
-                return _page(_form(games, queries, note), 404)
             if len(found) > 1:
-                return _page(_choices(game, found, {g: q for g, q in queries.items() if g != game}))
+                note = (f"<p class='warn'>Kilka drużyn ({GAMES[game]}) w dopuszczonych ligach ma tę "
+                        "nazwę — wpisz ID drużyny.</p>")
+                return _page(_form(games, queries, note), 409)
+            # Unknown team and a team that already has a key get the same answer, on purpose.
+            if not found or found[0]["entry"] in taken[game]:
+                note = (f"<p class='warn'>Drużyny „{_e(query)}” ({GAMES[game]}) nie ma w dopuszczonych "
+                        "ligach albo ma już wygenerowany klucz. Wpisz ID albo dokładną nazwę "
+                        "drużyny.</p>")
+                return _page(_form(games, queries, note), 404)
             chosen[game] = found[0]
 
         classic, draft = chosen.get("classic"), chosen.get("draft")
-        active = await asyncio.to_thread(self.store.active)
-        old_rows = [r for r in active
-                    if (classic and r.get("entry_id") is not None and int(r["entry_id"]) == classic["entry"])
-                    or (draft and r.get("draft_entry_id") is not None and int(r["draft_entry_id"]) == draft["entry"])]
-        if old_rows and not replace:
-            return _page(_confirm_replace(chosen, old_rows))
-
         key = new_key()
-        manager = (classic or draft)["manager"]
-        replaced = await asyncio.to_thread(
+        await asyncio.to_thread(
             lambda: self.store.issue(
-                key_sha256=hash_key(key), servers=["fpl"], manager_name=manager,
+                key_sha256=hash_key(key), servers=["fpl"], manager_name=(classic or draft)["manager"],
                 entry_id=classic["entry"] if classic else None,
                 league_id=classic["league_id"] if classic else None,
                 team_name=classic["team"] if classic else None,
@@ -571,9 +504,9 @@ class JoinService:
                 draft_league_id=draft["league_id"] if draft else None,
                 draft_team_name=draft["team"] if draft else None))
         self.registry.invalidate()
-        logger.info("MCP join: issued key for classic=%s draft=%s (replaced %d)",
-                    classic and classic["entry"], draft and draft["entry"], replaced)
-        task = asyncio.create_task(self._notify_quietly(_notice(chosen, replaced)))
+        logger.info("MCP join: issued key for classic=%s draft=%s",
+                    classic and classic["entry"], draft and draft["entry"])
+        task = asyncio.create_task(self._notify_quietly(_notice(chosen)))
         _background.add(task)
         task.add_done_callback(_background.discard)
         return _page(_issued(chosen, key, _public_base(request)))
@@ -585,15 +518,13 @@ class JoinService:
             logger.warning("MCP join: owner notification failed", exc_info=True)
 
 
-def _notice(chosen: dict, replaced: int) -> str:
+def _notice(chosen: dict) -> str:
     lines = [f"🔑 Nowy klucz MCP (FPL): {(chosen.get('classic') or chosen.get('draft'))['manager']}"]
     revoke = []
     for game, m in chosen.items():
         lines.append(f"{GAMES[game]}: {m['team']} (ID {m['entry']}), liga {m['league']}.")
         revoke.append(f"/mcp revoke {m['entry']}" if game == "classic"
                       else f"mcp-fpl keys revoke {m['entry']} --draft")
-    if replaced:
-        lines.append("Zastąpił poprzedni klucz.")
     lines.append("Odwołanie: " + " albo ".join(revoke))
     return "\n".join(lines)
 

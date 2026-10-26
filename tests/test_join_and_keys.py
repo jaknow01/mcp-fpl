@@ -21,6 +21,8 @@ ROWS = [
     {"entry": 102, "entry_name": "Kane & Able", "player_name": "Marek Kowalski", "rank": 2},
     {"entry": 103, "entry_name": "Ableton FC", "player_name": "Ola Nowak", "rank": 3},
     {"entry": 104, "entry_name": "<script>alert(1)</script>", "player_name": "Hacker", "rank": 4},
+    {"entry": 105, "entry_name": "Dwa Razy", "player_name": "Jan A", "rank": 5},
+    {"entry": 106, "entry_name": "dwa  razy", "player_name": "Jan B", "rank": 6},
 ]
 
 
@@ -43,8 +45,11 @@ def test_store_issue_replaces_and_revokes(tmp_path):
 
 
 @pytest.mark.parametrize("query, entries", [
-    ("101", [101]), ("999", []), ("los team", [101]), ("lukasz nowak", [101]),
-    ("MAREK KOWALSKI", [102]), ("nowak", [101, 103]), ("able", [102, 103]), ("", []),
+    ("101", [101]), ("999", []), ("ŁOŚ TEAM", [101]), ("  łoś   team ", [101]),
+    ("los team", []),                      # Polish letters must match
+    ("Łoś", []), ("able", []),             # no partial matches
+    ("Łukasz Nowak", []),                  # manager names are not team names
+    ("dwa razy", [105, 106]), ("", []),    # an exact name shared by two teams
 ])
 def test_match_members(query, entries):
     assert sorted(m["entry"] for m in match_members(query, _members())) == entries
@@ -82,8 +87,8 @@ async def _whoami(app, key):
         return await c.call_tool("whoami", {})
 
 
-def test_join_flow_issue_confirm_replace(env):
-    app, store, notices, _ = env
+def test_join_flow_exact_match_and_one_key_per_team(env):
+    app, store, notices, admin_key = env
     seen = {}
 
     async def flow():
@@ -92,27 +97,32 @@ def test_join_flow_issue_confirm_replace(env):
                 seen["form"] = await h.get("/join")
                 seen["old_path"] = await h.get("/mcp/join")
                 seen["missing"] = await h.post("/mcp/join", data={"team": "Nobody United"})
-                seen["ambiguous"] = await h.post("/mcp/join", data={"team": "nowak"})
-                seen["issued"] = await h.post("/mcp/join", data={"team": "Marek Kowalski"})
+                seen["partial"] = await h.post("/mcp/join", data={"team": "Kane"})
+                seen["manager"] = await h.post("/mcp/join", data={"team": "Marek Kowalski"})
+                seen["twins"] = await h.post("/mcp/join", data={"team": "Dwa razy"})
+                seen["issued"] = await h.post("/mcp/join", data={"team": "kane & able"})
                 key1 = _key_in(seen["issued"].text)
                 seen["who1"] = await _whoami(app, key1)
-                seen["again"] = await h.post("/mcp/join", data={"team": "102"})
-                seen["replaced"] = await h.post("/mcp/join", data={"team": "102", "replace": "1"})
-                key2 = _key_in(seen["replaced"].text)
-                try:
-                    await _whoami(app, key1)
-                    seen["old_rejected"] = False
-                except Exception:  # 401 at connect time
-                    seen["old_rejected"] = True
-                seen["who2"] = await _whoami(app, key2)
+                seen["again_id"] = await h.post("/mcp/join", data={"team": "102"})
+                seen["again_name"] = await h.post("/mcp/join", data={"team": "Kane & Able", "replace": "1"})
+                async with connect(app, "/mcp/fpl", admin_key) as c:  # a lost key: the admin revokes it
+                    await c.call_tool("revoke_issued_key", {"entry_id": 102})
+                seen["after_revoke"] = await h.post("/mcp/join", data={"team": "102"})
                 await asyncio.sleep(0)
-                return key1, key2
+                return key1
 
-    key1, key2 = asyncio.run(flow())
+    key1 = asyncio.run(flow())
     assert seen["form"].status_code == 200 and "<form" in seen["form"].text
     assert seen["old_path"].status_code == 200 and "action=''" in seen["form"].text
-    assert seen["missing"].status_code == 404 and _key_in(seen["missing"].text) is None
-    assert "Którą drużynę" in seen["ambiguous"].text and _key_in(seen["ambiguous"].text) is None
+    refused = "nie ma w dopuszczonych ligach albo ma już wygenerowany klucz"
+    for name in ("missing", "partial", "manager", "again_id", "again_name"):
+        page = seen[name]
+        assert page.status_code == 404 and refused in page.text and _key_in(page.text) is None, name
+        assert "Którą drużynę" not in page.text, name
+    # the same answer for "unknown" and "already has a key": nothing to tell them apart
+    assert seen["missing"].text.replace("Nobody United", "X") == seen["again_id"].text.replace("102", "X")
+    assert seen["twins"].status_code == 409 and "wpisz ID" in seen["twins"].text
+    assert _key_in(seen["twins"].text) is None and "Jan A" not in seen["twins"].text
     assert seen["issued"].headers["cache-control"] == "no-store"
     assert f"https://jarvis.example/mcp/{key1}" in seen["issued"].text
     assert "Claude" not in seen["form"].text and "agenta" in seen["form"].text
@@ -123,22 +133,21 @@ def test_join_flow_issue_confirm_replace(env):
     assert "No sign-in" in seen["issued"].text
     who1 = text_of(seen["who1"]).replace(" ", "")
     assert '"client":"fpl-102"' in who1 and '"default_entry_id":102' in who1
-    assert "ma już klucz" in seen["again"].text and _key_in(seen["again"].text) is None
+    key2 = _key_in(seen["after_revoke"].text)
     assert key2 and key2 != key1
-    assert seen["old_rejected"]
-    assert '"client":"fpl-102"' in text_of(seen["who2"]).replace(" ", "")
     assert [r["key_sha256"] for r in store.active()] == [hash_key(key2)]
-    assert len(notices) == 2 and "Zastąpił poprzedni" in notices[1]
+    assert len(notices) == 2
 
 
-def test_old_key_gets_401_after_replacement(env):
-    app, store, _, _ = env
+def test_revoked_key_gets_401(env):
+    app, store, _, admin_key = env
 
     async def flow():
         async with serving(app):
             async with http_client(app) as h:
                 k1 = _key_in((await h.post("/mcp/join", data={"team": "101"})).text)
-                await h.post("/mcp/join", data={"team": "101", "replace": "1"})
+                async with connect(app, "/mcp/fpl", admin_key) as c:
+                    await c.call_tool("revoke_issued_key", {"entry_id": 101})
                 body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
                 return (await h.post(f"/mcp/fpl/{k1}", json=body,
                                      headers={"Accept": "application/json, text/event-stream"})).status_code
@@ -273,30 +282,23 @@ def test_both_games_one_key_and_separate_id_spaces(env_draft):
     assert len(store.active()) == 1
 
 
-def test_ambiguous_draft_choice_keeps_classic_value(env_draft):
+def test_draft_name_is_exact_and_case_insensitive(env_draft):
     app, *_ = env_draft
-    (page,) = _post_all(app, {"team": "Marek Kowalski", "draft": "i"})  # 'i' matches both draft teams
-    assert "Którą drużynę" in page.text and "FPL Draft" in page.text
-    assert "name='team' value='Marek Kowalski'" in page.text and _key_in(page.text) is None
+    partial, exact = _post_all(app, {"draft": "Kurek"}, {"draft": "kurek xi"})
+    assert partial.status_code == 404 and "FPL Draft" in partial.text and _key_in(partial.text) is None
+    assert _key_in(exact.text) and "Kurek XI" in exact.text
 
 
-def test_replacing_a_two_game_key_with_one_game_warns(env_draft):
-    app, store, _, _ = env_draft
-    first, confirm, replaced = _post_all(app, {"team": "102", "draft": "2489"}, {"team": "102"},
-                                         {"team": "102", "replace": "1"})
+def test_a_taken_team_blocks_the_whole_request(env_draft):
+    app, store, notices, _ = env_draft
+    first, second = _post_all(app, {"team": "102", "draft": "2489"}, {"team": "103", "draft": "Kurek XI"})
     assert _key_in(first.text)
-    assert "ma już klucz" in confirm.text and "Kurek XI" in confirm.text
-    assert "nowy klucz jej nie" in confirm.text and _key_in(confirm.text) is None
-    assert _key_in(replaced.text)
+    # classic 103 is free, but the draft team already has a key: no key at all
+    assert second.status_code == 404 and _key_in(second.text) is None
+    assert "nie ma w dopuszczonych ligach albo ma już wygenerowany klucz" in second.text
+    assert "id='team' name='team' type='text' value='103'" in second.text  # the form keeps the input
     (row,) = store.active()
-    assert row["entry_id"] == 102 and row["draft_entry_id"] is None
-
-
-def test_new_draft_key_revokes_key_sharing_the_draft_team(env_draft):
-    app, store, _, _ = env_draft
-    _post_all(app, {"team": "103", "draft": "2489"}, {"draft": "2489", "replace": "1"})
-    (row,) = store.active()
-    assert row["draft_entry_id"] == 2489 and row["entry_id"] is None
+    assert (row["entry_id"], row["draft_entry_id"]) == (102, 2489) and len(notices) == 1
 
 
 def test_store_revokes_by_draft_entry(tmp_path):
