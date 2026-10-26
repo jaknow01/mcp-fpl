@@ -68,8 +68,7 @@ mcp-fpl backfill         # rebuild per-gameweek history from the FPL API (once, 
 mcp-fpl calls --days 7   # tool-call log: calls, clients, failures and timing per tool
 ```
 
-`collect` also deletes logged calls older than `MCP_CALL_LOG_DAYS` (default 180). The join page
-tells users that tool calls are recorded.
+Logged calls are kept for good; with `MCP_CALL_LOG_DAYS` set, `collect` deletes older ones.
 
 ## Run
 
@@ -98,4 +97,4 @@ Ingress); give the server its own hostname and expose `/mcp` and `/join`.
 | `JOIN_NOTIFY_WEBHOOK_URL` / `JOIN_NOTIFY_TOKEN` | where to POST `{"text": …}` for each issued key |
 | `MCP_JOIN_ENABLED`, `MCP_JOIN_PER_HOUR`, `MCP_JOIN_ROSTER_TTL_SECONDS` | join page switches |
 | `FPL_CACHE_TTL_SECONDS`, `FPL_LEAGUE_CACHE_TTL_SECONDS` | cache freshness |
-| `MCP_CALL_LOG`, `MCP_CALL_LOG_DAYS` | tool-call log on/off (default on with a database) and retention in days (180) |
+| `MCP_CALL_LOG`, `MCP_CALL_LOG_DAYS` | tool-call log on/off (default on with a database) and optional retention in days (default: keep all) |

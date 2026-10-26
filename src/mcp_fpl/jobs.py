@@ -29,19 +29,22 @@ def _leagues(explicit: Optional[list[int]]) -> list[int]:
 
 
 def purge_call_log() -> None:
-    """Apply the tool-call log retention (MCP_CALL_LOG_DAYS). Best-effort."""
+    """Apply the tool-call log retention when MCP_CALL_LOG_DAYS is set (default: keep all)."""
     from mcp_fpl.call_log import retention_days
     from mcp_fpl.db.call_log_repo import purge
+    days = retention_days()
+    if days is None:
+        return
     try:
-        n = purge(retention_days())
-        logger.info("Tool-call log: removed %d call(s) older than %d days", n, retention_days())
+        n = purge(days)
+        logger.info("Tool-call log: removed %d call(s) older than %d days", n, days)
     except Exception:
         logger.exception("Tool-call log purge failed")
 
 
 async def collect(leagues: Optional[list[int]] = None) -> int:
-    """Today's history snapshot per league (Postgres only), plus the tool-call log retention.
-    Exit 0 when all succeeded."""
+    """Today's history snapshot per league (Postgres only), plus the tool-call log retention
+    if one is set. Exit 0 when all succeeded."""
     if not dbconn.is_configured():
         logger.error("collect needs DATABASE_URL (league history is stored in Postgres)")
         return 2

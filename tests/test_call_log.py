@@ -74,3 +74,17 @@ def test_off_without_a_database(monkeypatch):
     assert call_log.enabled() is False
     monkeypatch.setenv("MCP_CALL_LOG", "off")
     assert call_log.enabled() is False
+
+
+def test_calls_are_kept_unless_a_retention_is_set(monkeypatch):
+    from mcp_fpl import jobs
+    from mcp_fpl.db import call_log_repo
+
+    purged = []
+    monkeypatch.setattr(call_log_repo, "purge", lambda days: purged.append(days) or 0)
+    monkeypatch.delenv("MCP_CALL_LOG_DAYS", raising=False)
+    jobs.purge_call_log()
+    assert purged == []
+    monkeypatch.setenv("MCP_CALL_LOG_DAYS", "365")
+    jobs.purge_call_log()
+    assert purged == [365]

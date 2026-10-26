@@ -5,8 +5,8 @@ tool results are not stored (only their size).
 
 Best-effort and off the request path: the row is written in a background thread after the
 call, and any logging failure is swallowed. Needs ``DATABASE_URL``; ``MCP_CALL_LOG=off``
-turns it off. ``MCP_CALL_LOG_DAYS`` (default 180) is the retention, applied by the daily
-``mcp-fpl collect`` job.
+turns it off. Calls are kept for good; setting ``MCP_CALL_LOG_DAYS`` makes the daily
+``mcp-fpl collect`` job delete older ones.
 """
 
 from __future__ import annotations
@@ -35,8 +35,10 @@ except PackageNotFoundError:  # pragma: no cover - running from a bare checkout
     _VERSION = None
 
 
-def retention_days() -> int:
-    return env_int("MCP_CALL_LOG_DAYS", 180, minimum=1)
+def retention_days() -> Optional[int]:
+    """Days to keep logged calls, or None (the default) to keep them for good."""
+    days = env_int("MCP_CALL_LOG_DAYS", 0, minimum=0)
+    return days or None
 
 
 def enabled() -> bool:
