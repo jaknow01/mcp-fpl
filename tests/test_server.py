@@ -6,7 +6,8 @@ from pathlib import Path
 from conftest import list_tools
 
 EXTRA_TOOLS = {"list_issued_keys", "revoke_issued_key",  # admin-only, new on the server
-               "get_draft_free_agents", "get_draft_activity"}  # FPL Draft only
+               "get_draft_free_agents", "get_draft_activity",  # FPL Draft only
+               "compare_squads"}
 BASELINE = json.loads((Path(__file__).parent / "baseline.json").read_text(encoding="utf-8"))
 
 

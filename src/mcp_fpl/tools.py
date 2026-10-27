@@ -9,7 +9,7 @@ deal with names, not raw ids."""
 import asyncio
 import logging
 from datetime import date, timedelta
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from mcp_fpl.server import server
 from mcp_fpl.identity import (
@@ -986,8 +986,28 @@ async def _draft_picks_as_classic(entry_id: int, gw: int, classic_bootstrap: dic
             for p in picks]
 
 
+_MAX_PLAYER_QUERIES = 20
+
+
+def _player_queries(player) -> list[str]:
+    """One name or a list of names → cleaned, de-duplicated queries (order kept)."""
+    items = player if isinstance(player, (list, tuple)) else [player]
+    queries = [str(p).strip() for p in items if p is not None and str(p).strip()]
+    return list(dict.fromkeys(queries))[:_MAX_PLAYER_QUERIES]
+
+
+def _resolve_player(bootstrap: dict, query: str, teams_by_id: dict):
+    """(element, None) for a unique match, else (None, the error/ambiguity block)."""
+    matches = find_players_by_name(bootstrap, query)
+    if not matches:
+        return None, {"query": query, "Error": f"No FPL player matched '{query}'."}
+    if len(matches) > 1:
+        return None, _ambiguous_players(query, matches, teams_by_id)
+    return matches[0], None
+
+
 @server.tool()
-async def who_owns_player_in_league(player: str,
+async def who_owns_player_in_league(player: Union[str, list[str]],
                                     league_id: Optional[int] = None,
                                     gameweek: Optional[int] = None,
                                     max_managers: int = _LEAGUE_SCAN_DEFAULT,
@@ -1000,16 +1020,19 @@ async def who_owns_player_in_league(player: str,
         gameweek, so it also knows who has captained the player or has him on their bench.
         In an FPL Draft league a player has at most one owner: the answer is that manager,
         or that the player is free to pick up (waivers / free agency).
+        Pass several players at once as a list — one call, not one call per player. To
+        compare whole squads ("who has my players", "how does my team differ from X"),
+        use compare_squads instead.
 
     Parameters:
-    player: str
-        The player's name (e.g. 'Haaland', 'Dalot', 'Bruno Fernandes'). Resolved against
-        the FPL player list; if the name is ambiguous the tool returns the candidates so
-        you can ask the user which one they meant.
+    player: str | list[str]
+        The player's name (e.g. 'Haaland', 'Dalot', 'Bruno Fernandes'), or a list of up to
+        20 names. Resolved against the FPL player list; if a name is ambiguous the tool
+        returns the candidates so you can ask the user which one they meant.
 
     league_id: Optional[int] = None
-        The classic league to scan. If omitted, the owner's configured
-        default league is used. Use get_my_fpl_leagues to discover league ids.
+        The league to scan. If omitted, the owner's configured default league is used.
+        Use get_my_fpl_leagues to discover league ids.
 
     gameweek: Optional[int] = None
         The gameweek whose squads to check. If omitted, the current gameweek is used.
@@ -1022,23 +1045,27 @@ async def who_owns_player_in_league(player: str,
         out when the owner's key is linked to one game only; the tool then uses that game.
 
     Output:
-        JSON object with the resolved player, the league, how many of the scanned
-        managers own the player (with in-league ownership %) and the list of owners
-        (manager, team name, rank, whether captained or benched by them). Draft: the
-        owner (or none) and whether the player is available.
+        For one player: the resolved player, the league, how many of the scanned managers
+        own the player (with in-league ownership %) and the list of owners (manager, team
+        name, rank, whether captained or benched by them). Draft: the owner (or none) and
+        whether the player is available. For a list: the league once, plus `players` — one
+        such block per name, in the order given.
     """
+    queries = _player_queries(player)
+    if not queries:
+        return {"Error": "Give at least one player name."}
     which = resolve_game(game)
     if isinstance(which, dict):
         return which
     if which == "draft":
-        return await _draft_owner(player, league_id)
+        return await _draft_owners(queries, league_id, single=isinstance(player, str))
     lid = _fpl_league_id(league_id)
     if lid is None:
         return {
             "Error": "No FPL league id is configured.",
             "Tip": missing_league_tip(),
         }
-    logger.info(f"Scanning league {lid} for owners of '{player}'")
+    logger.info(f"Scanning league {lid} for owners of {queries}")
     bootstrap, gw = None, None  # referenced by the error hint if the try fails early
     try:
         bootstrap = await fetch_fpl_bootstrap()
@@ -1050,58 +1077,54 @@ async def who_owns_player_in_league(player: str,
         return fpl_error("Error while scanning the league", e,
                          bootstrap=bootstrap, gameweek=gw)
 
-    matches = find_players_by_name(bootstrap, player)
-    if not matches:
-        return {"Error": f"No FPL player matched '{player}'."}
-    if len(matches) > 1:
+    resolved = [_resolve_player(bootstrap, q, teams_by_id) for q in queries]
+    single = isinstance(player, str) or len(queries) == 1
+    if single and resolved[0][0] is None:
+        problem = dict(resolved[0][1])
+        problem.pop("query", None)
+        return problem
+    pairs, league_name = [], None
+    if any(target is not None for target, _ in resolved):
+        try:
+            league_name, pairs = await load_league_squads(lid, gw, max(1, max_managers))
+        except Exception as e:
+            return fpl_error("Error while fetching the league squads", e,
+                             bootstrap=bootstrap, gameweek=gw)
+
+    squads = [(row, picks) for row, picks in pairs if picks is not None]
+    scanned, failed = len(squads), len(pairs) - len(squads)
+
+    def owners_of(target: dict) -> dict:
+        owners = []
+        for row, picks in squads:
+            pick = next((p for p in picks if p.get("element") == target["id"]), None)
+            if pick:
+                owners.append({
+                    "manager": row.get("player_name"),
+                    "team_name": row.get("entry_name"),
+                    "rank": row.get("rank"),
+                    "is_captain": pick.get("is_captain", False),
+                    "on_their_bench": pick.get("position", 0) > 11,
+                })
+        owners.sort(key=lambda o: o.get("rank") or 10**9)
         return {
-            "ambiguous_player": player,
-            "candidates": [
-                {"name": m.get("web_name"),
-                 "full_name": f"{m.get('first_name','')} {m.get('second_name','')}".strip(),
-                 "team": teams_by_id.get(m.get("team"), {}).get("short_name")}
-                for m in matches[:10]
-            ],
-            "Tip": "Ask the user which player they meant, then call again with a more specific name.",
+            "player": target.get("web_name"),
+            "team": teams_by_id.get(target.get("team"), {}).get("short_name"),
+            "owner_count": len(owners),
+            "ownership_pct_in_league": round(100 * len(owners) / scanned, 1) if scanned else None,
+            "owners": owners,
         }
 
-    target = matches[0]
-    target_id = target["id"]
-    try:
-        league_name, pairs = await load_league_squads(lid, gw, max(1, max_managers))
-    except Exception as e:
-        return fpl_error("Error while fetching the league squads", e,
-                         bootstrap=bootstrap, gameweek=gw)
-
-    owners, scanned, failed = [], 0, 0
-    for row, picks in pairs:
-        if picks is None:
-            failed += 1
-            continue
-        scanned += 1
-        pick = next((p for p in picks if p.get("element") == target_id), None)
-        if pick:
-            owners.append({
-                "manager": row.get("player_name"),
-                "team_name": row.get("entry_name"),
-                "rank": row.get("rank"),
-                "is_captain": pick.get("is_captain", False),
-                "on_their_bench": pick.get("position", 0) > 11,
-            })
-
-    owners.sort(key=lambda o: o.get("rank") or 10**9)
-    return {
-        "player": target.get("web_name"),
-        "team": teams_by_id.get(target.get("team"), {}).get("short_name"),
-        "league_id": lid,
-        "league_name": league_name,
-        "gameweek": gw,
-        "managers_scanned": scanned,
-        "owner_count": len(owners),
-        "ownership_pct_in_league": round(100 * len(owners) / scanned, 1) if scanned else None,
-        "owners": owners,
-        "unavailable_squads": failed or None,
-    }
+    blocks = [owners_of(target) if target is not None else problem for target, problem in resolved]
+    league = {"league_id": lid, "league_name": league_name, "gameweek": gw,
+              "managers_scanned": scanned}
+    if single:
+        block = blocks[0]
+        return {"player": block["player"], "team": block["team"], **league,
+                "owner_count": block["owner_count"],
+                "ownership_pct_in_league": block["ownership_pct_in_league"],
+                "owners": block["owners"], "unavailable_squads": failed or None}
+    return {**league, "unavailable_squads": failed or None, "players": blocks}
 
 
 def _ambiguous_players(query: str, matches: list[dict], teams_by_id: dict) -> dict:
@@ -1117,11 +1140,11 @@ def _ambiguous_players(query: str, matches: list[dict], teams_by_id: dict) -> di
     }
 
 
-async def _draft_owner(player: str, league_id: Optional[int]) -> dict:
+async def _draft_owners(queries: list[str], league_id: Optional[int], single: bool) -> dict:
     lid = resolve_draft_league_id(league_id)
     if lid is None:
         return _no_draft_league()
-    logger.info(f"Looking up the owner of '{player}' in FPL Draft league {lid}")
+    logger.info(f"Looking up the owners of {queries} in FPL Draft league {lid}")
     try:
         bootstrap = await fetch_draft_bootstrap()
         statuses, details = await asyncio.gather(fetch_draft_element_status(lid), fetch_draft_league(lid))
@@ -1129,30 +1152,42 @@ async def _draft_owner(player: str, league_id: Optional[int]) -> dict:
         return fpl_error("Error while checking the FPL Draft league", e)
 
     teams_by_id, _, positions_by_id = index_draft_bootstrap(bootstrap)
-    matches = find_players_by_name(bootstrap, player)
-    if not matches:
-        return {"Error": f"No FPL player matched '{player}'."}
-    if len(matches) > 1:
-        return _ambiguous_players(player, matches, teams_by_id)
-
-    target = matches[0]
     league = DraftLeague(details)
-    status = next((x for x in statuses if x.get("element") == target["id"]), {})
-    owner = status.get("owner")
+    status_by_element = {x.get("element"): x for x in statuses}
     my_entry = resolve_draft_entry_id(None)
-    out = {"game": "draft", **describe_draft_player(target, teams_by_id, positions_by_id),
-           "league_id": lid, "league_name": league.name}
-    if owner is not None:
-        out["owned"] = True
-        out["owner"] = {**league.by_entry(owner), "is_me": owner == my_entry}
-        out["in_pending_trade"] = bool(status.get("in_accepted_trade"))
-    else:
-        out["owned"] = False
-        out["available_via"] = ("waivers" if league.transaction_mode == "waivers" else "free agency")
-        out["note"] = ("Unowned in this league. Under waivers a claim is processed at the waiver "
-                       "deadline by waiver priority; outside the waiver window it can be picked up "
-                       "as a free agent.")
-    return out
+
+    def owner_of(target: dict) -> dict:
+        status = status_by_element.get(target["id"], {})
+        owner = status.get("owner")
+        out = describe_draft_player(target, teams_by_id, positions_by_id)
+        if owner is not None:
+            out["owned"] = True
+            out["owner"] = {**league.by_entry(owner), "is_me": owner == my_entry}
+            out["in_pending_trade"] = bool(status.get("in_accepted_trade"))
+        else:
+            out["owned"] = False
+            out["available_via"] = ("waivers" if league.transaction_mode == "waivers" else "free agency")
+        return out
+
+    blocks = []
+    for q in queries:
+        target, problem = _resolve_player(bootstrap, q, teams_by_id)
+        blocks.append(owner_of(target) if target is not None else problem)
+    head = {"game": "draft", "league_id": lid, "league_name": league.name}
+    free_note = ("Unowned in this league. Under waivers a claim is processed at the waiver "
+                 "deadline by waiver priority; outside the waiver window it can be picked up "
+                 "as a free agent.")
+    if single or len(queries) == 1:
+        block = blocks[0]
+        if "Error" in block or "ambiguous_player" in block:
+            block.pop("query", None)
+            return block
+        if not block["owned"]:
+            block["note"] = free_note
+        return {"game": "draft", **block, "league_id": lid, "league_name": league.name}
+    if any(b.get("owned") is False for b in blocks):
+        head["note_on_unowned"] = free_note
+    return {**head, "players": blocks}
 
 
 @server.tool()
@@ -1244,6 +1279,220 @@ async def get_league_ownership(league_id: Optional[int] = None,
         "managers_scanned": scanned,
         "top_owned": top_owned,
     }
+
+
+def _player_label(element: dict, teams_by_id: dict, positions_by_id: dict) -> str:
+    team = teams_by_id.get(element.get("team"), {}).get("short_name") or "?"
+    pos = positions_by_id.get(element.get("element_type"), {}).get("singular_name_short") or "?"
+    return f"{element.get('web_name')} ({team}, {pos})"
+
+
+def _wanted(managers: Optional[list[str]], matches) -> tuple[Optional[set], list[str]]:
+    """Which rivals the caller asked for: (None = all, else a set of entry ids) plus the
+    queries that matched no one. ``matches(query)`` returns the entry ids for one query."""
+    queries = [str(m).strip() for m in (managers or []) if m is not None and str(m).strip()]
+    if not queries:
+        return None, []
+    wanted, unmatched = set(), []
+    for q in queries:
+        found = matches(q)
+        wanted.update(found)
+        if not found:
+            unmatched.append(q)
+    return wanted, unmatched
+
+
+@server.tool()
+async def compare_squads(managers: Optional[list[str]] = None,
+                         league_id: Optional[int] = None,
+                         gameweek: Optional[int] = None,
+                         max_managers: int = _LEAGUE_SCAN_DEFAULT,
+                         game: Game = None) -> dict:
+    """
+    Description:
+        Compares the owner's squad with the other squads in a mini-league in ONE call. Use
+        it for "compare my team with the league / with X", "who else has my players",
+        "what are my differentials", "how does my squad differ from the leader's" — instead
+        of calling who_owns_player_in_league once per player.
+        Classic: for each rival, the players you share, the players only you have, the
+        players only they have, and their captain; plus, for each of your players, which
+        rivals own him. Draft: each player belongs to one manager, so squads never
+        overlap — it returns every compared squad side by side (starting XI and bench) with
+        its season points and form totals.
+
+    Parameters:
+    managers: Optional[list[str]] = None
+        Rivals to compare with: manager names, team names (case-insensitive, part of the
+        name is enough) or entry ids. If omitted, everyone in the league is compared.
+
+    league_id: Optional[int] = None
+        The league. If omitted, the owner's configured default league is used.
+
+    gameweek: Optional[int] = None
+        The gameweek whose squads to compare. If omitted, the current gameweek is used.
+
+    max_managers: int = 50
+        Classic only: safety cap on how many managers (from the top of the table) to scan.
+
+    game: "classic" | "draft" | None = None
+        Which game: classic FPL or FPL Draft (separate games with separate ids). Leave it
+        out when the owner's key is linked to one game only; the tool then uses that game.
+
+    Output:
+        JSON with the league, the gameweek, `me` (team name and squad) and `rivals` (one
+        entry per compared manager, by rank). Players are labelled "Name (TEAM, POS)".
+        Classic also returns `my_players`: each of your players with the rivals who own him.
+        `unmatched_managers` lists names from `managers` that matched no one.
+    """
+    which = resolve_game(game)
+    if isinstance(which, dict):
+        return which
+    if which == "draft":
+        return await _draft_compare(managers, league_id, gameweek)
+
+    eid = _fpl_entry_id(None)
+    if eid is None:
+        return {"Error": "No FPL manager id is configured.", "Tip": missing_entry_tip()}
+    lid = _fpl_league_id(league_id)
+    if lid is None:
+        return {"Error": "No FPL league id is configured.", "Tip": missing_league_tip()}
+    logger.info(f"Comparing entry {eid} with league {lid}")
+    bootstrap, gw = None, None
+    try:
+        bootstrap = await fetch_fpl_bootstrap()
+        gw = resolve_gameweek(bootstrap, gameweek, prefer="current")
+        if gw is None:
+            return {"Error": "Could not determine a gameweek (no events in the FPL calendar)."}
+        teams_by_id, elements_by_id, positions_by_id = index_bootstrap(bootstrap)
+        league_name, pairs = await load_league_squads(lid, gw, max(1, max_managers))
+        my_row, my_picks = next(((r, p) for r, p in pairs if r.get("entry") == eid), (None, None))
+        if my_picks is None:
+            data = await fetch_fpl(f"entry/{eid}/event/{gw}/picks/")
+            if isinstance(data, dict) and data.get("detail"):
+                return {"Error": f"FPL API: {data['detail']}", "entry_id": eid, "gameweek": gw}
+            my_picks = data.get("picks", [])
+    except Exception as e:
+        return fpl_error("Error while comparing squads", e, bootstrap=bootstrap, gameweek=gw)
+
+    label = lambda el: _player_label(elements_by_id.get(el, {}), teams_by_id, positions_by_id)  # noqa: E731
+    captain = lambda picks: next((label(p["element"]) for p in picks if p.get("is_captain")), None)  # noqa: E731
+
+    def matches(q: str) -> set:
+        ql = q.lower()
+        return {r.get("entry") for r, _ in pairs
+                if (q.isdigit() and r.get("entry") == int(q))
+                or ql in (r.get("player_name") or "").lower()
+                or ql in (r.get("entry_name") or "").lower()}
+
+    wanted, unmatched = _wanted(managers, matches)
+    rivals_raw = [(r, p) for r, p in pairs
+                  if r.get("entry") != eid and (wanted is None or r.get("entry") in wanted)]
+    mine = [p.get("element") for p in my_picks]
+    mine_set = set(mine)
+    owners_of_mine: dict = {el: [] for el in mine}
+    rivals, unavailable = [], []
+    for row, picks in sorted(rivals_raw, key=lambda rp: rp[0].get("rank") or 10**9):
+        if picks is None:
+            unavailable.append(row.get("entry_name"))
+            continue
+        theirs = [p.get("element") for p in picks]
+        theirs_set = set(theirs)
+        for el in mine_set & theirs_set:
+            owners_of_mine[el].append(row.get("entry_name"))
+        rivals.append({
+            "manager": row.get("player_name"),
+            "team_name": row.get("entry_name"),
+            "rank": row.get("rank"),
+            "total_points": row.get("total"),
+            "shared_count": len(mine_set & theirs_set),
+            "shared": [label(el) for el in mine if el in theirs_set],
+            "only_mine": [label(el) for el in mine if el not in theirs_set],
+            "only_theirs": [label(el) for el in theirs if el not in mine_set],
+            "their_captain": captain(picks),
+        })
+
+    out = {
+        "game": "classic",
+        "league_id": lid,
+        "league_name": league_name,
+        "gameweek": gw,
+        "me": {"team_name": (my_row or {}).get("entry_name"), "rank": (my_row or {}).get("rank"),
+               "captain": captain(my_picks), "squad": [label(el) for el in mine]},
+        "rivals": rivals,
+        "my_players": [{"player": label(el), "owned_by_rivals": len(owners_of_mine[el]),
+                        "owners": owners_of_mine[el]} for el in mine],
+    }
+    if unmatched:
+        out["unmatched_managers"] = unmatched
+    if unavailable:
+        out["unavailable_squads"] = unavailable
+    return out
+
+
+async def _draft_compare(managers: Optional[list[str]], league_id: Optional[int],
+                         gameweek: Optional[int]) -> dict:
+    eid = resolve_draft_entry_id(None)
+    if eid is None:
+        return _no_draft_entry()
+    lid = resolve_draft_league_id(league_id)
+    if lid is None:
+        return _no_draft_league()
+    logger.info(f"Comparing FPL Draft entry {eid} with league {lid}")
+    gw = None
+    try:
+        bootstrap, details, game_info = await asyncio.gather(
+            fetch_draft_bootstrap(), fetch_draft_league(lid), fetch_draft_game())
+        gw = draft_gameweek(game_info, gameweek)
+        if gw is None:
+            return {"Error": "Could not determine a gameweek (no current Draft gameweek)."}
+    except Exception as e:
+        return fpl_error("Error while comparing FPL Draft squads", e, gameweek=gw)
+
+    teams_by_id, elements_by_id, positions_by_id = index_draft_bootstrap(bootstrap)
+    league = DraftLeague(details)
+    rank_by_entry = {}
+    for s in details.get("standings", []) or []:
+        entry = league.by_league_entry.get(s.get("league_entry"))
+        if entry:
+            rank_by_entry[entry.get("entry_id")] = s.get("rank")
+    wanted, unmatched = _wanted(managers, lambda q: {e.get("entry_id") for e in league.find_manager(q)})
+    entries = [e.get("entry_id") for e in league.entries if e.get("entry_id") is not None
+               and (e.get("entry_id") == eid or wanted is None or e.get("entry_id") in wanted)]
+    if eid not in entries:
+        entries.insert(0, eid)
+    results = await asyncio.gather(*(fetch_draft(f"entry/{e}/event/{gw}") for e in entries),
+                                   return_exceptions=True)
+
+    def squad(picks: list[dict]) -> dict:
+        els = [(p, elements_by_id.get(p.get("element"), {})) for p in picks]
+        label = lambda el: _player_label(el, teams_by_id, positions_by_id)  # noqa: E731
+        return {
+            "starting_xi": [label(el) for p, el in els if p.get("position", 0) <= 11],
+            "bench": [label(el) for p, el in els if p.get("position", 0) > 11],
+            "season_points_total": sum(el.get("total_points") or 0 for _, el in els),
+            "form_total": round(sum(_num(el.get("form")) for _, el in els), 1),
+        }
+
+    me, rivals, unavailable = None, [], []
+    for entry_id, result in zip(entries, results):
+        who = {**league.by_entry(entry_id), "rank": rank_by_entry.get(entry_id)}
+        if isinstance(result, BaseException) or not isinstance(result, dict):
+            unavailable.append(who.get("team_name") or entry_id)
+            continue
+        block = {**who, **squad(result.get("picks", []))}
+        if entry_id == eid:
+            me = block
+        else:
+            rivals.append(block)
+    rivals.sort(key=lambda r: r.get("rank") or 10**9)
+    out = {"game": "draft", "league_id": lid, "league_name": league.name, "gameweek": gw,
+           "note": "In FPL Draft each player belongs to one manager, so squads never overlap.",
+           "me": me, "rivals": rivals}
+    if unmatched:
+        out["unmatched_managers"] = unmatched
+    if unavailable:
+        out["unavailable_squads"] = unavailable
+    return out
 
 
 _POSITIONS = {"GKP": 1, "DEF": 2, "MID": 3, "FWD": 4}

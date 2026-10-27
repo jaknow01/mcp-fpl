@@ -14,7 +14,8 @@ already linked to their team(s). Data comes live from the keyless public FPL and
 | `get_my_fpl_leagues` | your classic and/or Draft mini-leagues |
 | `get_fpl_league_standings` | a mini-league table (Draft H2H: plus the gameweek's matches) |
 | `get_league_history` | how standings/squads in a classic league changed over time (needs Postgres + `collect`) |
-| `who_owns_player_in_league` | who has a player in a mini-league (Draft: the owner, or that he is free) |
+| `compare_squads` | your squad vs. the rest of a mini-league in one call: shared players, differentials, captains (Draft: squads side by side) |
+| `who_owns_player_in_league` | who has a player — or a list of players — in a mini-league (Draft: the owner, or that he is free) |
 | `get_league_ownership` | most-owned / most-captained players in a classic mini-league |
 | `get_draft_free_agents` | Draft: best unowned players (waiver / free-agent targets) |
 | `get_draft_activity` | Draft: waivers and free-agent moves, trades, draft picks |
