@@ -244,8 +244,8 @@ def _form(games: list[str], prefill: Optional[dict] = None, note: str = "") -> s
             f"<input id='draft' name='draft' type='text' value='{_e(prefill.get('draft', ''))}' "
             "autocomplete='off' placeholder='ID drużyny albo jej dokładna nazwa'>"
             "<p class='muted'>Draft to osobna gra z osobnym ID i nazwą drużyny.</p>")
-    both = ("<p class='muted'>Wypełnij jedno albo oba pola. Jeśli grasz w obie gry, jeden klucz "
-            "obejmie obie drużyny.</p>" if len(games) > 1 else "")
+    both = ("<p class='muted'>Wypełnij jedno albo oba pola, w zależności od tego, w które tryby "
+            "grasz.</p>" if len(games) > 1 else "")
     return (
         "<div class='card'>"
         "<p>Podłącz narzędzia FPL (terminarz z FDR, Twoja drużyna, wyniki na żywo, tabela "
