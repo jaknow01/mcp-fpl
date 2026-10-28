@@ -1,6 +1,7 @@
 name: ci
-# Tests on every push/PR. A tag v* also builds the image into GHCR and bumps its tag in the
-# private GitOps repo (jaknow01/homelab-gitops), which Argo CD syncs to the cluster.
+# Tests on every push/PR. Every push to main (and every tag v*) also builds the image into
+# GHCR and bumps its tag in the private GitOps repo (jaknow01/homelab-gitops), which Argo CD
+# syncs to the cluster. main is tagged main-<short sha>, a release tag v* keeps its own name.
 on:
   push:
     branches: [main]
@@ -22,10 +23,20 @@ jobs:
       - run: uv run pytest -q
 
   image:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push'
     needs: test
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
+      - name: Image tag
+        id: tag
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=main-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -39,7 +50,7 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
             ${{ env.IMAGE }}:latest
 
   deploy:
@@ -47,14 +58,16 @@ jobs:
     # jaknow01/homelab-gitops. Without it the step is skipped (image is still published).
     needs: image
     runs-on: ubuntu-latest
+    concurrency: gitops-deploy  # one bump at a time, in push order
     env:
       GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+      TAG: ${{ needs.image.outputs.tag }}
     steps:
       - name: Check token
         id: token
         run: |
           if [ -z "$GITOPS_TOKEN" ]; then
-            echo "::warning::GITOPS_TOKEN not set — bump ${{ env.GITOPS_DIR }} to ${{ github.ref_name }} by hand"
+            echo "::warning::GITOPS_TOKEN not set — bump ${{ env.GITOPS_DIR }} to $TAG by hand"
             echo "ok=false" >> "$GITHUB_OUTPUT"
           else
             echo "ok=true" >> "$GITHUB_OUTPUT"
@@ -69,7 +82,6 @@ jobs:
         if: steps.token.outputs.ok == 'true'
         working-directory: gitops
         run: |
-          TAG="${{ github.ref_name }}"
           yq -i "(.images[] | select(.name == \"$IMAGE\")).newTag = \"$TAG\"" "$GITOPS_DIR/kustomization.yaml"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
