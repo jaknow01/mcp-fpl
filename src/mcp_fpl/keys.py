@@ -150,7 +150,7 @@ def issued_clients() -> list[Client]:
     return [client_from_row(r) for r in key_store().active()]
 
 
-@server.tool(read_only=True, open_world=False)
+@server.tool(read_only=True, open_world=False, admin_only=True)
 async def list_issued_keys() -> dict:
     """
     Description:
@@ -170,7 +170,7 @@ async def list_issued_keys() -> dict:
     return {"count": len(keys), "keys": keys}
 
 
-@server.tool(read_only=False, destructive=True, open_world=False)
+@server.tool(read_only=False, destructive=True, open_world=False, admin_only=True)
 async def revoke_issued_key(entry_id: int, game: Literal["classic", "draft"] = "classic") -> dict:
     """
     Description:

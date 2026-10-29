@@ -202,7 +202,7 @@ def test_admin_tools(env):
             return denied, listing, revoked
 
     denied, listing, revoked = asyncio.run(flow())
-    assert denied.is_error and "admin" in text_of(denied)
+    assert denied.is_error and text_of(denied) == "Unknown tool: revoke_issued_key"
     assert "Ableton FC" in text_of(listing) and "c" * 64 not in text_of(listing)
     assert '"revoked": 1' in text_of(revoked)
     assert [r["entry_id"] for r in store.active()] == [101]

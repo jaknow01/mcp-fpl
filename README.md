@@ -20,7 +20,7 @@ already linked to their team(s). Data comes live from the keyless public FPL and
 | `get_draft_free_agents` | Draft: best unowned players (waiver / free-agent targets) |
 | `get_draft_activity` | Draft: waivers and free-agent moves, trades, draft picks |
 | `whoami` | your key's client and default teams/leagues |
-| `list_issued_keys` / `revoke_issued_key` | admin only |
+| `list_issued_keys` / `revoke_issued_key` | admin-only: listed and callable only for keys with `admin: true` (hidden from every other key) |
 
 Endpoints: `/mcp` (key in header) or `/mcp/<key>`, `/join`; the longer `/mcp/fpl[/<key>]`
 and `/mcp/join` keep working.

@@ -13,11 +13,12 @@ PATH = f"/mcp/{SERVER}"
 
 @pytest.fixture
 def keys(tmp_path, monkeypatch):
-    keys = {"jarvis": new_key(), "friend": new_key()}
+    keys = {"jarvis": new_key(), "friend": new_key(), "admin": new_key()}
     path = tmp_path / "clients.yaml"
     path.write_text(yaml.safe_dump(clients_yaml(
         jarvis={"key": keys["jarvis"], "servers": [SERVER], "trusted": True, "rate_limit_per_minute": 1000},
         friend={"key": keys["friend"], "servers": [SERVER], "rate_limit_per_minute": 1000},
+        admin={"key": keys["admin"], "servers": [SERVER], "admin": True},
     )))
     monkeypatch.setenv("MCP_CLIENTS_CONFIG", str(path))
     return keys

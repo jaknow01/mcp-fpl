@@ -5,8 +5,8 @@ from pathlib import Path
 
 from conftest import list_tools
 
-EXTRA_TOOLS = {"list_issued_keys", "revoke_issued_key",  # admin-only, new on the server
-               "get_draft_free_agents", "get_draft_activity",  # FPL Draft only
+ADMIN_TOOLS = {"list_issued_keys", "revoke_issued_key"}  # admin-only: hidden from other keys
+EXTRA_TOOLS = {"get_draft_free_agents", "get_draft_activity",  # FPL Draft only
                "compare_squads"}
 BASELINE = json.loads((Path(__file__).parent / "baseline.json").read_text(encoding="utf-8"))
 
@@ -28,3 +28,21 @@ def test_tool_parity_with_jarvis_baseline(app, keys):
 def test_every_tool_has_a_description(app, keys):
     for tool in list_tools(app, keys["friend"]):
         assert tool.description and len(tool.description) > 20, tool.name
+
+
+def test_admin_tools_listed_only_for_admin_keys(app, keys):
+    import asyncio
+
+    from jarvis_mcp_kit.testing import connect, serving
+
+    async def go():
+        async with serving(app):
+            out = {}
+            for who in ("friend", "jarvis", "admin"):
+                async with connect(app, "/mcp/fpl", keys[who]) as client:
+                    out[who] = {t.name for t in (await client.list_tools()).tools}
+            return out
+
+    listed = asyncio.run(go())
+    assert not ADMIN_TOOLS & listed["friend"] and not ADMIN_TOOLS & listed["jarvis"]  # trusted ≠ admin
+    assert ADMIN_TOOLS <= listed["admin"]
