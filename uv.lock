@@ -497,8 +497,8 @@ wheels = [
 
 [[package]]
 name = "jarvis-mcp-kit"
-version = "0.3.0"
-source = { git = "https://github.com/jaknow01/jarvis-mcp-kit.git?rev=v0.3.0#0c6368937d2a6c0fdb3aa7c1259ec2580ad5dd42" }
+version = "0.4.0"
+source = { git = "https://github.com/jaknow01/jarvis-mcp-kit.git?rev=v0.4.0#00500a1a0b0357f1e3e18edd2330a81cb200ad27" }
 dependencies = [
     { name = "mcp" },
     { name = "pyyaml" },
@@ -560,7 +560,7 @@ wheels = [
 
 [[package]]
 name = "mcp-fpl"
-version = "0.4.5"
+version = "0.4.6"
 source = { editable = "." }
 dependencies = [
     { name = "jarvis-mcp-kit" },
@@ -576,7 +576,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "jarvis-mcp-kit", git = "https://github.com/jaknow01/jarvis-mcp-kit.git?rev=v0.3.0" },
+    { name = "jarvis-mcp-kit", git = "https://github.com/jaknow01/jarvis-mcp-kit.git?rev=v0.4.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "requests", specifier = ">=2.31" },
